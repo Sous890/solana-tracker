@@ -6,6 +6,15 @@
 *.key
 keypair*.json
 wallet*.json
+# …except recorded transaction fixtures, whose FILENAMES collide with the rule
+# above while their contents are public chain data. `wallet-key-from-lookup-table`
+# describes what the capture exercises — a wallet key resolved from an address
+# lookup table — not what it contains: a mainnet signature, account keys and
+# instruction data, no key material. The suite fails 7 swapParser tests without
+# it, and because the file was ignored it was never committed and `git status`
+# stayed clean, so the gap was invisible. Scoped to this one directory, so a
+# real keypair dropped anywhere else in the tree is still ignored.
+!tests/fixtures/transactions/wallet*.json
 
 # local config (may contain operator-specific paths)
 config.json

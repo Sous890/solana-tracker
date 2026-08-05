@@ -601,6 +601,80 @@ describe('a session the RECORDER wrote is one the HARNESS can read', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Determinism on a REAL session
+// ---------------------------------------------------------------------------
+
+/**
+ * The synthetic fixture below cannot catch what this catches.
+ *
+ * It never quotes the same pair at the same size twice and never screens a mint
+ * twice, so it passed for months against a loader that collapsed repeats — and
+ * the first real session put through this harness was not replayable at all.
+ * See docs/handoffs/19-*.md.
+ *
+ * Recorded 2026-08-05 against live Helius mainnet, paper mode, `mirror`, at the
+ * 30 bps the run actually used. 6,839 lines: 1,857 swaps, 73 quotes, 17 screens,
+ * 6 price ticks and 4,886 `unmodeled`.
+ */
+describe('a REAL recorded session replays, and replays identically', () => {
+  const REAL = join(import.meta.dirname, 'replay/fixtures/real-mirror-20260805.jsonl');
+  const text = readFileSync(REAL, 'utf8');
+
+  async function serializeReal(): Promise<string> {
+    const { report } = await replaySession({
+      // Re-parsed per run on purpose: a loader that mutated its own session
+      // would otherwise make the second run agree with the first for the wrong
+      // reason.
+      session: parseSession(text, 'real'),
+      sessionLabel: 'real',
+      strategyName: 'mirror',
+      // The bps the session was recorded at. Any other value asks the broker for
+      // token amounts the recording was never asked to price.
+      slippageBps: 30,
+    });
+    return `${JSON.stringify(report, null, 2)}\n`;
+  }
+
+  it('replays end to end, with no quote miss and no screen miss', async () => {
+    const { report, quoteMisses } = await replaySession({
+      session: parseSession(text, 'real'),
+      sessionLabel: 'real',
+      strategyName: 'mirror',
+      slippageBps: 30,
+    });
+    expect(quoteMisses).toEqual([]);
+    // Not vacuous: it has to actually trade, or "replays clean" would also be
+    // true of a session that did nothing. Before the seq-aware resolution this
+    // session could not be replayed at all — every ladder point died on a
+    // QUOTE MISS.
+    expect(report.trades.roundTrips).toBeGreaterThan(0);
+    expect(report.trades.buys).toBeGreaterThan(0);
+    expect(report.ledgerReconcilesClean).toBe(true);
+  });
+
+  it('two runs produce byte-identical output', async () => {
+    const first = await serializeReal();
+    const second = await serializeReal();
+    // Byte-for-byte, not deep-equal: a deep-equal passes on two objects whose
+    // keys serialize in a different order.
+    expect(Buffer.compare(Buffer.from(second), Buffer.from(first))).toBe(0);
+    // A guard against the comparison passing on two empty strings.
+    expect(first.length).toBeGreaterThan(500);
+  });
+
+  it('carries unmodeled lines and replays anyway — the count is a result', () => {
+    const session = parseSession(text, 'real');
+    const unmodeled = session.lines.filter((line) => line.kind === 'unmodeled');
+    // 4,886 of 6,839 lines. Overwhelmingly `tracker:swap-unparsed`, plus 105
+    // stream disconnects. Asserted as nonzero rather than as an exact number:
+    // the point is that a session this full of unmodeled input still replays,
+    // and that nobody can quietly stop recording them.
+    expect(unmodeled.length).toBeGreaterThan(0);
+    expect(session.truncatedTail).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Determinism
 // ---------------------------------------------------------------------------
 

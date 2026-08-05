@@ -25,23 +25,58 @@ export class SessionError extends Error {
   }
 }
 
+/** One recorded answer, tagged with the `seq` it was recorded at. */
+export interface RecordedQuote {
+  seq: number;
+  simClockMs: number;
+  payload: QuotePayload;
+}
+
+/** One recorded screen verdict, tagged with the `seq` it was recorded at. */
+export interface RecordedScreen {
+  seq: number;
+  simClockMs: number;
+  payload: ScreenPayload;
+}
+
 export interface LoadedSession {
   lines: SessionLine[];
   /**
-   * `(inMint, outMint, amount)` -> what the aggregator answered, FIRST answer.
+   * `(inMint, outMint, amount)` -> the FIRST answer recorded for that key.
    *
-   * First wins, not last. A key can be quoted more than once — the settlement
-   * probe added in prompt 13 re-quotes the same request 400ms later to measure
-   * decay — and the quote a replay must resolve is the one that motivated the
-   * intent, not a later observation of the same pair.
+   * **Do not resolve a replay against this map.** It cannot distinguish the two
+   * reasons a key repeats, and getting that wrong silently prices a trade off
+   * the wrong market. Use `resolveQuoteAt`, which takes the `seq` being
+   * replayed. Kept because "was this pair ever quoted at all" — the NO_ROUTE
+   * latch — is a question with no position in the session.
    */
   quotes: Map<string, QuotePayload>;
-  /** Every answer for a key, in order. The decay report reads these. */
-  quoteHistory: Map<string, QuotePayload[]>;
+  /**
+   * Every answer for a key, in `seq` order, with the seq it was recorded at.
+   *
+   * A key repeats for two unrelated reasons and only the seq tells them apart:
+   * the settlement probe re-quotes the same request 400ms later to measure
+   * decay, and a strategy buys the same mint again an hour later at the same
+   * size. Measured on the 2026-08-05 session: 17 of 41 keys repeat, 10 of those
+   * got materially different answers, and `9uNefL6…` was quoted 8 times at
+   * 0.05 SOL across a 6.58% spread.
+   */
+  quoteHistory: Map<string, RecordedQuote[]>;
   /** A final line cut off mid-write by a crash. See `truncatedTail`. */
   truncatedTail: string | null;
-  /** mint -> the last screen verdict recorded for it. */
+  /**
+   * mint -> the LAST screen verdict recorded for it.
+   *
+   * **Do not resolve a replay against this map either** — same defect as
+   * `quotes`, same reason. A mint screened three times across a session gets
+   * three verdicts, and collapsing them to the last one lets a later `pass`
+   * authorise an entry the live run refused. Measured on the 2026-08-05
+   * session: `9uNefL6…` screened `unknown` at seq 4898 and the live run opened
+   * nothing, then `pass` at 5046 and 6280. Use `resolveScreenAt`.
+   */
   screens: Map<Address, ScreenPayload>;
+  /** Every verdict for a mint, in `seq` order, with the seq it was recorded at. */
+  screenHistory: Map<Address, RecordedScreen[]>;
   /** Swaps and price ticks, in `seq` order — the things a replay drives. */
   drivable: Array<
     | { seq: number; simClockMs: number; kind: 'swap'; swap: TrackedSwap }
@@ -118,8 +153,9 @@ export function parseSession(text: string, label: string): LoadedSession {
   }
 
   const quotes = new Map<string, QuotePayload>();
-  const quoteHistory = new Map<string, QuotePayload[]>();
+  const quoteHistory = new Map<string, RecordedQuote[]>();
   const screens = new Map<Address, ScreenPayload>();
+  const screenHistory = new Map<Address, RecordedScreen[]>();
   const drivable: LoadedSession['drivable'] = [];
 
   for (const line of lines) {
@@ -131,16 +167,24 @@ export function parseSession(text: string, label: string): LoadedSession {
           outMint: payload.request.outMint,
           inAmount: BigInt(payload.request.inAmount),
         });
-        // First wins — see `quotes`.
+        // First wins — see `quotes`. Every answer is kept in `quoteHistory`,
+        // which is what a replay resolves against.
         if (!quotes.has(key)) quotes.set(key, payload);
+        const recorded: RecordedQuote = { seq: line.seq, simClockMs: line.simClockMs, payload };
         const history = quoteHistory.get(key);
-        if (history === undefined) quoteHistory.set(key, [payload]);
-        else history.push(payload);
+        if (history === undefined) quoteHistory.set(key, [recorded]);
+        else history.push(recorded);
         break;
       }
       case 'screen': {
         const payload = line.payload as ScreenPayload;
+        // Last wins — see `screens`. Every verdict is kept in `screenHistory`,
+        // which is what a replay resolves against.
         screens.set(payload.mint, payload);
+        const seen: RecordedScreen = { seq: line.seq, simClockMs: line.simClockMs, payload };
+        const verdicts = screenHistory.get(payload.mint);
+        if (verdicts === undefined) screenHistory.set(payload.mint, [seen]);
+        else verdicts.push(seen);
         break;
       }
       case 'swap':
@@ -168,11 +212,126 @@ export function parseSession(text: string, label: string): LoadedSession {
     }
   }
 
-  return { lines, quotes, quoteHistory, screens, drivable, truncatedTail };
+  return { lines, quotes, quoteHistory, screens, screenHistory, drivable, truncatedTail };
 }
 
 export function loadSession(path: string): LoadedSession {
   return parseSession(readFileSync(path, 'utf8'), path);
+}
+
+/**
+ * The answer for `key` as it stood at `atSeq` — the quote nearest in session
+ * time to the event being replayed.
+ *
+ * ── WHY NOT "FIRST WINS", AND WHY NOT A QUEUE ─────────────────────────────
+ *
+ * A key repeats for two unrelated reasons, and the fix has to survive both.
+ * The settlement probe re-quotes the same request 400ms later, which is one
+ * market observed twice. A strategy buying the same mint again an hour later is
+ * two markets. First-wins collapsed them: on the 2026-08-05 session it priced
+ * the third buy of `9uNefL6…` off the first buy's quote, so the exit then asked
+ * to sell an amount no live quote had ever covered and the whole session was
+ * unreplayable. 32 of its 73 recorded quote lines were unreachable.
+ *
+ * Consuming a queue per request does not work either: the live run records
+ * quotes the replay never asks for, because `safety.ts` quotes both directions
+ * while screening and a replay resolves screens from recorded verdicts instead
+ * of re-running the screener. Measured, the recording holds three buy-side
+ * quotes per traded occasion where the replay issues two. A queue would drift
+ * by one every trade and the drift would be silent.
+ *
+ * Seq has neither problem. Every request made while replaying event `n` sees
+ * the same answer — the earliest one recorded at or after `n` — so the guard's
+ * price-impact check and the broker's execution agree, as they did live, and a
+ * probe re-quote recorded later cannot displace the quote that motivated the
+ * intent. Falling back to the most recent earlier answer covers the tail, where
+ * an exit is driven by a price tick recorded after the last quote.
+ */
+export function resolveQuoteAt(
+  session: Pick<LoadedSession, 'quoteHistory'>,
+  key: string,
+  atSeq: number,
+): QuotePayload | undefined {
+  const history = session.quoteHistory.get(key);
+  if (history === undefined || history.length === 0) return undefined;
+  // `history` is in seq order: it is built by one pass over an already-ordered
+  // session, which `parseSession` has verified.
+  for (const burst of burstsOf(history)) {
+    if (burst[0]!.seq >= atSeq) return burst[burst.length - 1]!.payload;
+  }
+  return history[history.length - 1]!.payload;
+}
+
+/**
+ * Milliseconds of quiet that end a burst.
+ *
+ * Measured on the 2026-08-05 session, the two populations do not overlap and
+ * are three orders of magnitude apart: gaps inside a burst run 0–2,158ms
+ * (26 of 32 are under a second), while the shortest gap between two genuine
+ * trading occasions in the same mint is 747,626ms — twelve minutes. Anywhere in
+ * between separates them; a minute leaves margin on both sides.
+ */
+const BURST_QUIET_MS = 60_000;
+
+/**
+ * Split one key's answers into bursts — the quotes belonging to a single
+ * decision — so `resolveQuoteAt` can return the one the trade executed against.
+ *
+ * A single entry decision produces SEVERAL quotes for the same key, because the
+ * screener quotes the pair before the guard layer and the broker do. Measured,
+ * the order is: screener forward, screener reverse, the `screen` verdict, then
+ * the execution quote. The live run fills on the LAST of them — verified on
+ * three separate occasions in the 2026-08-05 session, where the exit amount is
+ * always the last burst member's `outAmount` times the slippage factor and
+ * never the first's.
+ *
+ * That is why this returns the last of a burst rather than the first. Taking
+ * the first picks the screener's probe, which is a real quote for the same pair
+ * at the same size but is not the price anything traded at, and the exit then
+ * asks to sell a quantity no live quote ever covered.
+ *
+ * **If a settlement probe is ever added that re-quotes AFTER execution**, the
+ * last member stops being the execution quote and this rule breaks. The fix
+ * then is not another heuristic but a reason tag on the recorded quote line, so
+ * a replay can select by intent instead of by position.
+ */
+function burstsOf(history: readonly RecordedQuote[]): RecordedQuote[][] {
+  const bursts: RecordedQuote[][] = [];
+  let current: RecordedQuote[] = [];
+  let previousAt: number | undefined;
+  for (const recorded of history) {
+    if (previousAt !== undefined && recorded.simClockMs - previousAt > BURST_QUIET_MS) {
+      bursts.push(current);
+      current = [];
+    }
+    current.push(recorded);
+    previousAt = recorded.simClockMs;
+  }
+  if (current.length > 0) bursts.push(current);
+  return bursts;
+}
+
+/**
+ * The screen verdict for `mint` as it stood at `atSeq`.
+ *
+ * Same rule as `resolveQuoteAt`, for the same reason. A mint is screened once
+ * per entry decision, so collapsing a session's verdicts to the last one hands
+ * every earlier decision an answer from the future. On the 2026-08-05 session
+ * that turned a live `unknown` — which opened nothing — into a `pass`, so the
+ * replay took a position the run had refused and then tried to exit it at a
+ * size no live quote had ever covered.
+ */
+export function resolveScreenAt(
+  session: Pick<LoadedSession, 'screenHistory'>,
+  mint: Address,
+  atSeq: number,
+): ScreenPayload | undefined {
+  const verdicts = session.screenHistory.get(mint);
+  if (verdicts === undefined || verdicts.length === 0) return undefined;
+  for (const seen of verdicts) {
+    if (seen.seq >= atSeq) return seen.payload;
+  }
+  return verdicts[verdicts.length - 1]!.payload;
 }
 
 /** Turn a recorded quote payload back into what a `QuoteSource` returns. */

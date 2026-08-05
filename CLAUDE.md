@@ -1,7 +1,122 @@
-# solana-tracker — working notes for Claude
+# CLAUDE.md
 
-See `README.md` for architecture and `docs/handoffs/` for session history.
-`docs/handoffs/18-flake-mechanisms.md` is the most recent.
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+A wallet-mirroring execution engine for Solana. TypeScript, Node 24, vitest,
+SQLite (`better-sqlite3`).
+
+**Paper mode only.** `createTrackerRuntime` throws `RuntimeConfigError` on
+`mode: "live"` — only `paperBroker.ts` implements `Broker`, so a live run would
+simulate every fill while claiming not to. Do not create or load a keypair path.
+
+## Read before changing anything
+
+- `README.md` — layering, the control API, and the recorded decisions behind
+  the integer money model, the orphan gate, and disk-not-chain reconciliation.
+  It is current and detailed; do not re-derive it, and do not duplicate it here.
+- `docs/handoffs/` — one file per session, numbered. **`19-replay-resolution.md`
+  is the most recent.** Read the latest two before starting. They record what
+  was verified from code and the database versus what was recalled, which is the
+  distinction that matters most in this repo.
+
+## Commands
+
+Node 24 is keg-only Homebrew here, so it may need to be on `PATH`:
+`export PATH="/opt/homebrew/opt/node@24/bin:$PATH"`.
+
+| Command | What it does |
+| --- | --- |
+| `npm test` | Full vitest suite — currently **854 tests across 21 files** |
+| `npx vitest run tests/soak.test.ts` | One test file |
+| `npx vitest run tests/soak.test.ts -t "SIGKILL"` | One test by name substring |
+| `npm run typecheck` | `tsc -p tsconfig.test.json` — types `src` **and** `tests` |
+| `npm run build` | `tsc -p tsconfig.json` — compiles `src` to `dist` |
+| `npm run serve` | Process + control API on `127.0.0.1:8787`. Boots **idle** |
+| `npm run replay -- <session.jsonl>` | Replay a session through the real guards and broker |
+| `npm run orphans` | The only supported way to lift the crash-orphan gate |
+| `npm run soak` | Long-running soak driver |
+
+`npm run typecheck` and `npm run build` cover different file sets — a change to
+`tests/` is only checked by the former. Run both.
+
+## Architecture worth knowing before you read files
+
+`README.md` has the folder boundaries and the one-way dependency chain. What it
+does not spell out, and what costs the most time to reconstruct:
+
+**The intent pipeline is the spine.** A strategy returns an `IntentDraft` with
+no id and no authority. `StrategyRunner` assigns the id, stamps provenance,
+writes the intent, and puts it through the same `guarded()` layer and the same
+broker an operator command uses. Fields a strategy must not be able to forge —
+`signalAgeMs` among them — are **overwritten, not merged**, by the runner
+(`services/strategyRunner.ts`). A strategy is untrusted: a throw or a call over
+500ms becomes a `strategy-error`, is treated as "do nothing", and cannot stop a
+loop or change bot state.
+
+**Rejections are the measurement surface.** Guards write `rejection_code` onto
+the intent row, so `STALE_SIGNAL` firing 272 times is a fact you can query. This
+is why strategies deliberately do *not* pre-filter on things the guards check —
+filtering in the strategy makes the drop invisible, because no row is ever
+written. See the long comment in `strategies/mirror.ts` before adding a check.
+
+**Recorder and replay are a matched pair.** `services/recorder.ts` writes
+sessions as JSONL and records **inputs only** — swaps, quotes, screens, price
+ticks — never fills, intents or positions, because replay regenerates those
+through the real broker and guards. A session that carried outputs could be
+replayed into agreement with itself. `seq` is monotonic across the whole run
+including rotations; the replay loader **refuses a session with a `seq` gap**,
+so anything that drops or loses a line makes the session unfit for replay. The
+fifth line kind, `unmodeled`, exists so the schema is falsifiable — a nonzero
+count is the finding, not a nuisance, and the fix is never to widen one of the
+other four until the tag disappears.
+
+**A replay resolves recorded inputs by `seq`, never by identity alone.** Both
+`quotes` and `screens` on `LoadedSession` are identity-keyed maps that collapse
+repeats — a mint bought twice at the same size, or screened twice with different
+verdicts — and resolving against either silently prices a trade off the wrong
+market or authorises an entry the live run refused. Use `resolveQuoteAt` and
+`resolveScreenAt`. Handoff 19 has the arithmetic; the short version is that the
+first real session ever put through the harness was not replayable at all, while
+the synthetic fixture had passed for months because it repeats nothing.
+
+**Adapters are wrapped, not modified, for recording.** `wrapQuotes`,
+`wrapScreener` and `wrapDriver` are installed at the composition root, so
+`jupiter.ts` and `safety.ts` have never heard of recording. `wrapDriver` is a
+`Proxy` on purpose — `StrategyDriver` is an `EventEmitter`, and a plain object
+literal or `Object.create` would silently break `strategy-error` delivery.
+
+**Two SQLite modules share one file.** `db/ledger.ts` (the books) and
+`db/runtimeState.ts` (kill switch, cursors) open the same path on separate
+connections, both with a busy timeout. `db/fillsView.ts` is a third, read-only
+connection that exists only because `ledger.ts` was frozen.
+
+**Strategy purity is enforced mechanically.** `tests/strategy.test.ts` greps
+`src/strategies/` for `Date.now()`, `Math.random()` and `fetch`, and checks the
+import boundary. It fails the build on a hit, because byte-identical replay is
+only enforceable there.
+
+## Hard constraints
+
+These are repeated in every session prompt. They are not style preferences.
+
+- **The sell path is never gated by a risk limit.** No kill switch, daily loss
+  cap, concurrency cap or orphan gate may ever block an exit. If a change would
+  add any condition that can block a sell, stop and report instead.
+- **Never loosen a config floor, a guard check, a test assertion, or a timeout
+  to make something pass.** Not once, not temporarily. Fix the mechanism.
+  Tightening an assertion is fine; weakening one is not.
+- **`src/core/` does no I/O and no network.** `config.ts`'s `readFileSync` is
+  the one deliberate exception. `zod` is an accepted dependency — the invariant
+  is no I/O, not zero dependencies.
+- **`db/ledger.ts` is off-limits** unless a session prompt carries an explicit,
+  *signed* sign-off. An unsigned placeholder is not a sign-off; ask.
+- **Do not change the status-flip ordering in `Tracker.start()` / `stop()`.**
+  `setStatus('stopping')` happens first and before any await, because that is
+  what guard gate 2 reads; an entry racing the call is already refused.
+- **Do not touch TAU, `kelly_fraction`, or M.** A rejection is a valid output.
+  The wallet rejection in handoff 17 is settled and is not to be re-litigated.
+- Paper mode only. Nothing in ordinary work should need the network; if you find
+  yourself hitting RPC, you have wandered off task.
 
 ## Known gaps
 
@@ -73,3 +188,86 @@ itself a latency fact worth quantifying.
 `PoolState` models a constant-product pool. A pre-graduation bonding curve is
 not one, so `price_impact` and `exit_depth_ratio` do not describe its shape.
 Many tracked mints end in `pump`. Unflagged in the current exports.
+
+### 8. `signalAgeMs` is checked but not stored
+
+272 of 290 intents on 2026-08-05 were rejected `STALE_SIGNAL`. The rejection
+code is persisted; the age is not, so `maxSignalAgeMs` cannot be tuned from the
+ledger. Fixing it needs an additive nullable `signal_age_ms` column on
+`intents`, which means `db/ledger.ts`, which needs a signed sign-off. Do not
+backfill and do not infer an age from timestamps — a wrong number is worse than
+a missing one.
+
+### 9. Most observed transactions do not parse
+
+Measured on the 2026-08-05 session: **4,495 `tracker:swap-unparsed` against
+1,857 parsed swaps — a 71% unparsed share**, where the soak digest's own
+threshold for raising a finding is 1%. Every win rate, payoff ratio and fill
+rate in this repo is computed on the 29% that parsed, and **nothing establishes
+that the two groups resemble each other.** If the parser fails
+disproportionately on one venue, one pool shape, or one size band, every
+calibration number inherits that skew with no visible symptom.
+
+Unlike gaps 1-3 this one has no established direction, which is worse rather
+than better: it cannot be argued away as conservative. The tags are already in
+every session file, so the first cut is cheap.
+
+Same session, unexplained: **105 `stream-disconnected` against 19
+`stream-reconnected`** in under five hours. Either the stream is far less stable
+than assumed or the two events are not recorded symmetrically. Both readings
+matter for what a soak's coverage is worth.
+
+## Environment traps
+
+Each of these has already cost a session.
+
+- **The working directory has a trailing space**:
+  `/Volumes/LaCie/Operation grootenstine /solana-tracker`. A path written
+  without it does not exist, and the error looks like a missing repo.
+- **exFAT sprays `._*` AppleDouble sidecars.** They are binary and blow up the
+  vitest transform (hence the `**/._*` exclude in `vitest.config.ts`). Filter
+  them out of every `find`, `ls` and `grep`.
+- **`pkill -f "tsx src/cli/serve.ts"` does not match**, because of the space in
+  the path. Killing the `npx` wrapper orphans the `node` process beneath it,
+  which keeps SQLite open and produces a `SQLITE_BUSY` that looks exactly like a
+  production defect. Kill by PID from `ps aux | grep serve.ts`, then verify with
+  `ps`.
+- **Helius rate-limits at ~10 rps** and returns `Service overloaded` as a
+  JSON-RPC error with **HTTP 200** — a naive client reads that as success.
+- **zsh aborts the entire command line** when a glob matches nothing
+  (`rm -f /tmp/x.*.log` on an empty directory). A measurement loop written that
+  way silently never runs and reports zero failures, which reads exactly like a
+  passing baseline.
+- **Piping a long loop through `tail` buffers all of it**, so progress is
+  invisible until it exits. Write per-run logs instead.
+- **A gitignore secrets rule can swallow a required fixture, invisibly.** Fixed
+  in handoff 19 for `wallet*.json`, but the shape recurs: an ignored file never
+  shows as untracked, so `git status` stays clean while the working copy holds
+  the only copy. If the suite passes here and fails in a clone, suspect this
+  before suspecting the test. The check is `git clone . /tmp/x && cd /tmp/x`.
+- On a fresh `npm ci`, install scripts may be gated, leaving `better-sqlite3`
+  with no native binding. `npm approve-scripts better-sqlite3 esbuild fsevents`
+  then re-run `npm ci` — and revert the `allowScripts` block it writes into
+  `package.json` before committing.
+
+## Testing notes
+
+`tests/soak.test.ts` contains a real crash drill: it spawns an `npx tsx` child,
+SIGKILLs it as a **process group** (`process.kill(-pid)`), and replays the
+session it left behind. Both of its historical flakes were mechanism bugs, fixed
+in handoff 18 — if either returns, it is a regression, not noise.
+
+When a test is flaky, measure the rate before and after, isolated and under
+load, and name the race you removed. `it.skip`, vitest `retry:`, `--no-threads`,
+a longer sleep as the only change, and weakening the assertion are all
+forbidden. 30 consecutive passes only bounds the true failure rate below roughly
+10% at 95% confidence — the run count corroborates a fix, the named mechanism
+justifies it.
+
+## Handoff convention
+
+Every session ends with `docs/handoffs/<n>-<slug>.md` and one commit whose
+message describes the **mechanism, not the symptom**. Write the handoff in the
+style of 17 and 18: what was verified from the code and the database rather than
+recalled, what remains unknown, and what the next session should do first.
+Update the "most recent" pointer at the top of this file when you add one.

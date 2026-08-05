@@ -41,7 +41,7 @@ import { createStrategy } from '../../src/services/strategyRegistry.js';
 import type { Strategy } from '../../src/core/strategy.js';
 import { StrategyRunner } from '../../src/services/strategyRunner.js';
 import { InvariantChecker, InvariantViolation } from './invariants.js';
-import { loadSession, materialiseQuote } from './session.js';
+import { loadSession, materialiseQuote, resolveQuoteAt, resolveScreenAt } from './session.js';
 import type { LoadedSession } from './session.js';
 import { buildReport, formatTable, slippageVerdict } from './report.js';
 import type { ReplayReport, TradeRecord } from './report.js';
@@ -164,13 +164,21 @@ export async function replaySession(options: ReplayOptions): Promise<ReplayResul
   const noRouteWhileHeld = new Set<string>();
   const checker = new InvariantChecker(ledger);
 
+  /**
+   * The seq of the session event currently being replayed.
+   *
+   * Declared out here, above the quote source that reads it, because quotes are
+   * resolved as of this point in the session — see `resolveQuoteAt`.
+   */
+  let currentSeq = 0;
+
   try {
     // -- the recorded market ------------------------------------------------
 
     const quotes: QuoteSource = {
       getQuote: async (request) => {
         const key = quoteKey(request);
-        const recorded = options.session.quotes.get(key);
+        const recorded = resolveQuoteAt(options.session, key, currentSeq);
         if (recorded === undefined) {
           // Never synthesised. A replay that invents a price is a replay of a
           // market that never existed.
@@ -206,7 +214,7 @@ export async function replaySession(options: ReplayOptions): Promise<ReplayResul
       latencyMs: 0,
       now: () => clock.tick(),
       canSell: async (mint) => {
-        const screen = options.session.screens.get(mint);
+        const screen = resolveScreenAt(options.session, mint, currentSeq);
         if (screen === undefined) {
           throw new ReplayError(
             `SCREEN MISS: no recorded screenMint verdict for ${mint}.\n` +
@@ -232,7 +240,6 @@ export async function replaySession(options: ReplayOptions): Promise<ReplayResul
 
     // -- the execution pipeline, minus the tracker's I/O --------------------
 
-    let currentSeq = 0;
     let escaped: Error | undefined;
     /**
      * `Tracker.submit`, minus the event emitter — same order, same guarantees.
@@ -356,7 +363,7 @@ export async function replaySession(options: ReplayOptions): Promise<ReplayResul
         outMint: WRAPPED_SOL_MINT,
         inAmount: position.tokens,
       });
-      const exitQuote = options.session.quotes.get(exitKey);
+      const exitQuote = resolveQuoteAt(options.session, exitKey, entry.seq);
       if (exitQuote !== undefined && exitQuote.error?.error === 'NO_ROUTE') {
         noRouteWhileHeld.add(entry.tick.mint);
         continue;
