@@ -1,0 +1,213 @@
+{
+  "recordedAt": "2026-08-03T19:54:39.182Z",
+  "currentEpochAtCapture": 1011,
+  "mint": "pu1AJ8fUgUhRYh6Y2dHq3pTGmkQTRmyVJnpJNPYpump",
+  "jsonParsed": {
+    "context": {
+      "apiVersion": "4.1.0",
+      "slot": 437033844
+    },
+    "value": {
+      "data": {
+        "parsed": {
+          "info": {
+            "decimals": 6,
+            "extensions": [
+              {
+                "extension": "metadataPointer",
+                "state": {
+                  "authority": null,
+                  "metadataAddress": "pu1AJ8fUgUhRYh6Y2dHq3pTGmkQTRmyVJnpJNPYpump"
+                }
+              },
+              {
+                "extension": "tokenMetadata",
+                "state": {
+                  "additionalMetadata": [],
+                  "mint": "pu1AJ8fUgUhRYh6Y2dHq3pTGmkQTRmyVJnpJNPYpump",
+                  "name": "ascend",
+                  "symbol": "ASCEND",
+                  "updateAuthority": null,
+                  "uri": "https://metadata.j7tracker.io/metadata/f2245faae05d443d.json"
+                }
+              }
+            ],
+            "freezeAuthority": null,
+            "isInitialized": true,
+            "mintAuthority": null,
+            "supply": "1000000000000000"
+          },
+          "type": "mint"
+        },
+        "program": "spl-token-2022",
+        "space": 390
+      },
+      "executable": false,
+      "lamports": 3605280,
+      "owner": "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb",
+      "rentEpoch": 18446744073709552000,
+      "space": 390
+    }
+  },
+  "base64": {
+    "context": {
+      "apiVersion": "4.1.0",
+      "slot": 437033845
+    },
+    "value": {
+      "data": [
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIDGpH6NAwAGAQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAARIAQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAxFGQVhAT9e7fvnnxIgRuFaj4DEK2QxTAP4PyGCNO4/EwCYAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADEUZBWEBP17t++efEiBG4VqPgMQrZDFMA/g/IYI07j8GAAAAYXNjZW5kBgAAAEFTQ0VORDwAAABodHRwczovL21ldGFkYXRhLmo3dHJhY2tlci5pby9tZXRhZGF0YS9mMjI0NWZhYWUwNWQ0NDNkLmpzb24AAAAA",
+        "base64"
+      ],
+      "executable": false,
+      "lamports": 3605280,
+      "owner": "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb",
+      "rentEpoch": 18446744073709552000,
+      "space": 390
+    }
+  },
+  "forwardQuote": {
+    "status": 200,
+    "body": {
+      "inputMint": "So11111111111111111111111111111111111111112",
+      "inAmount": "50000000",
+      "outputMint": "pu1AJ8fUgUhRYh6Y2dHq3pTGmkQTRmyVJnpJNPYpump",
+      "outAmount": "1358238904007",
+      "otherAmountThreshold": "1317491736887",
+      "swapMode": "ExactIn",
+      "slippageBps": 300,
+      "platformFee": null,
+      "priceImpactPct": "0.012394988792847108768152828",
+      "routePlan": [
+        {
+          "swapInfo": {
+            "ammKey": "4mmL8AzqUtH2tUV9Dcm9kUoUz9xRSpit8ARHNnpp3289",
+            "label": "Pump.fun",
+            "inputMint": "So11111111111111111111111111111111111111112",
+            "outputMint": "pu1AJ8fUgUhRYh6Y2dHq3pTGmkQTRmyVJnpJNPYpump",
+            "inAmount": "50000000",
+            "outAmount": "1358238904007",
+            "updateContextSlot": "437033847"
+          },
+          "percent": 100,
+          "bps": null
+        }
+      ],
+      "contextSlot": 437033847,
+      "timeTaken": 0.000116649,
+      "swapUsdValue": "3.70036996342365",
+      "mostReliableAmmsQuoteReport": {
+        "info": {
+          "Czfq3xZZDmsdGdUyrNLtRhGc47cXcZtLG4crryfu44zE": "Not used RG: FullLiquidIntermediate, contains ALT: true",
+          "pu1AJ8fUgUhRYh6Y2dHq3pTGmkQTRmyVJnpJNPYpump": "No MRP"
+        }
+      },
+      "longtailMarketQuoteReport": null,
+      "useIncurredSlippageForQuoting": null,
+      "useRewards": null,
+      "otherRoutePlans": null,
+      "loadedLongtailToken": false,
+      "instructionVersion": null
+    }
+  },
+  "reverseQuote": {
+    "status": 200,
+    "body": {
+      "inputMint": "pu1AJ8fUgUhRYh6Y2dHq3pTGmkQTRmyVJnpJNPYpump",
+      "inAmount": "1222415013606",
+      "outputMint": "So11111111111111111111111111111111111111112",
+      "outAmount": "43617275",
+      "otherAmountThreshold": "42308757",
+      "swapMode": "ExactIn",
+      "slippageBps": 300,
+      "platformFee": null,
+      "priceImpactPct": "0.0185623130918804154807540656",
+      "routePlan": [
+        {
+          "swapInfo": {
+            "ammKey": "4mmL8AzqUtH2tUV9Dcm9kUoUz9xRSpit8ARHNnpp3289",
+            "label": "Pump.fun",
+            "inputMint": "pu1AJ8fUgUhRYh6Y2dHq3pTGmkQTRmyVJnpJNPYpump",
+            "outputMint": "So11111111111111111111111111111111111111112",
+            "inAmount": "1222415013606",
+            "outAmount": "43617275",
+            "updateContextSlot": "437033848"
+          },
+          "percent": 100,
+          "bps": null
+        }
+      ],
+      "contextSlot": 437033848,
+      "timeTaken": 0.000124356,
+      "swapUsdValue": "3.228001085927785671075",
+      "mostReliableAmmsQuoteReport": {
+        "info": {
+          "Czfq3xZZDmsdGdUyrNLtRhGc47cXcZtLG4crryfu44zE": "Not used RG: FullLiquidIntermediate, contains ALT: true",
+          "pu1AJ8fUgUhRYh6Y2dHq3pTGmkQTRmyVJnpJNPYpump": "No MRP"
+        }
+      },
+      "longtailMarketQuoteReport": null,
+      "useIncurredSlippageForQuoting": null,
+      "useRewards": null,
+      "otherRoutePlans": null,
+      "loadedLongtailToken": false,
+      "instructionVersion": null
+    }
+  },
+  "dexscreener": {
+    "schemaVersion": "1.0.0",
+    "pairs": [
+      {
+        "chainId": "solana",
+        "dexId": "pumpfun",
+        "url": "https://dexscreener.com/solana/4mml8azquth2tuv9dcm9kuouz9xrspit8arhnnpp3289",
+        "pairAddress": "4mmL8AzqUtH2tUV9Dcm9kUoUz9xRSpit8ARHNnpp3289",
+        "baseToken": {
+          "address": "pu1AJ8fUgUhRYh6Y2dHq3pTGmkQTRmyVJnpJNPYpump",
+          "name": "ascend",
+          "symbol": "ASCEND"
+        },
+        "quoteToken": {
+          "address": "So11111111111111111111111111111111111111112",
+          "name": "Wrapped SOL",
+          "symbol": "SOL"
+        },
+        "priceNative": "0.0000001464",
+        "priceUsd": "0.00001084",
+        "txns": {
+          "m5": {
+            "buys": 268,
+            "sells": 172
+          },
+          "h1": {
+            "buys": 268,
+            "sells": 172
+          },
+          "h6": {
+            "buys": 268,
+            "sells": 172
+          },
+          "h24": {
+            "buys": 268,
+            "sells": 172
+          }
+        },
+        "volume": {
+          "h24": 14780.31,
+          "h6": 14780.31,
+          "h1": 14780.31,
+          "m5": 14780.31
+        },
+        "priceChange": {
+          "m5": 390,
+          "h1": 390,
+          "h6": 390,
+          "h24": 390
+        },
+        "fdv": 10846.34,
+        "marketCap": 10846.34,
+        "pairCreatedAt": 1785786812000
+      }
+    ]
+  }
+}

@@ -1,0 +1,512 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Wallet screener — solana-tracker</title>
+    <style>
+      :root {
+        --bg: #0b0e13;
+        --panel: #12161f;
+        --panel-2: #171c27;
+        --line: #232a38;
+        --ink: #e6eaf2;
+        --dim: #8b95a8;
+        --faint: #5d6779;
+        --accent: #5eead4;
+        --good: #4ade80;
+        --warn: #fbbf24;
+        --bad: #f87171;
+        --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--ink);
+        font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+      }
+      .wrap { max-width: 1080px; margin: 0 auto; padding: 24px 20px 64px; }
+
+      header { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; margin-bottom: 4px; }
+      h1 { font-size: 18px; margin: 0; letter-spacing: -0.01em; }
+      .sub { color: var(--faint); font-size: 12px; font-family: var(--mono); }
+
+      .bar {
+        display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+        background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+        padding: 12px 14px; margin: 16px 0;
+      }
+      .spacer { flex: 1 1 auto; }
+
+      .badge {
+        font-family: var(--mono); font-size: 11px; text-transform: uppercase;
+        letter-spacing: 0.06em; padding: 3px 8px; border-radius: 999px;
+        border: 1px solid var(--line); color: var(--dim); background: var(--panel-2);
+      }
+      .badge.good { color: var(--good); border-color: #1e4d33; }
+      .badge.warn { color: var(--warn); border-color: #4d3f16; }
+      .badge.bad  { color: var(--bad);  border-color: #4d2222; }
+
+      button {
+        font: inherit; font-size: 13px; color: var(--ink); background: var(--panel-2);
+        border: 1px solid var(--line); border-radius: 7px; padding: 7px 13px; cursor: pointer;
+      }
+      button:hover:not(:disabled) { border-color: #33405a; }
+      button:disabled { opacity: 0.4; cursor: not-allowed; }
+      button.primary { background: #133b34; border-color: #1d5a4d; color: var(--accent); }
+      button.danger { color: var(--bad); }
+      button.tiny { padding: 3px 8px; font-size: 12px; }
+
+      input, textarea {
+        font: inherit; color: var(--ink); background: #0d1118;
+        border: 1px solid var(--line); border-radius: 7px; padding: 8px 10px; width: 100%;
+      }
+      input:focus, textarea:focus { outline: none; border-color: #2f6f63; }
+      input.mono { font-family: var(--mono); font-size: 13px; }
+
+      section { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; margin: 16px 0; }
+      section > h2 {
+        font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--dim);
+        margin: 0; padding: 12px 16px; border-bottom: 1px solid var(--line); font-weight: 600;
+      }
+      .body { padding: 14px 16px; }
+
+      .form { display: grid; grid-template-columns: 1fr 200px auto; gap: 10px; align-items: start; }
+      @media (max-width: 720px) { .form { grid-template-columns: 1fr; } }
+
+      table { width: 100%; border-collapse: collapse; }
+      th {
+        text-align: left; font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em;
+        color: var(--faint); font-weight: 600; padding: 8px 16px; border-bottom: 1px solid var(--line);
+      }
+      td { padding: 10px 16px; border-bottom: 1px solid #1a202b; vertical-align: middle; }
+      tr:last-child td { border-bottom: none; }
+      .addr { font-family: var(--mono); font-size: 12px; color: var(--dim); }
+      .label { font-weight: 500; }
+      .note { color: var(--faint); font-size: 12px; }
+      .empty { padding: 28px 16px; text-align: center; color: var(--faint); }
+
+      .banner {
+        border-radius: 8px; padding: 10px 14px; font-size: 13px; margin: 0 0 14px;
+        border: 1px solid; display: flex; gap: 10px; align-items: center; flex-wrap: wrap;
+      }
+      .banner.warn { border-color: #4d3f16; background: #211c0d; color: #f5d68a; }
+      .banner.bad { border-color: #4d2222; background: #221010; color: #f6b0b0; }
+      .banner.info { border-color: #23384d; background: #0f1a24; color: #a9cbe6; }
+
+      #log {
+        font-family: var(--mono); font-size: 12px; color: var(--dim);
+        max-height: 240px; overflow-y: auto; padding: 10px 16px; margin: 0;
+      }
+      #log div { padding: 2px 0; white-space: pre-wrap; word-break: break-word; }
+      #log .t { color: var(--faint); }
+      #log .k { color: var(--accent); }
+
+      .toggle { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; font-size: 12px; color: var(--dim); }
+      .toggle input { width: auto; }
+      .right { text-align: right; white-space: nowrap; }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <header>
+        <h1>Wallet screener</h1>
+        <span class="sub" id="origin"></span>
+      </header>
+
+      <div class="bar">
+        <span class="badge" id="b-mode">mode …</span>
+        <span class="badge" id="b-status">status …</span>
+        <span class="badge" id="b-positions">positions …</span>
+        <span class="spacer"></span>
+        <button id="btn-start" class="primary">Start</button>
+        <button id="btn-stop">Stop</button>
+        <button id="btn-refresh">Refresh</button>
+      </div>
+
+      <div id="banners"></div>
+
+      <section>
+        <h2>Add a wallet to watch</h2>
+        <div class="body">
+          <form class="form" id="add-form">
+            <input
+              id="f-address"
+              class="mono"
+              placeholder="Base58 wallet address (32–44 chars)"
+              autocomplete="off"
+              spellcheck="false"
+            />
+            <input id="f-label" placeholder="Label (optional)" autocomplete="off" />
+            <button type="submit" class="primary">Add wallet</button>
+          </form>
+          <div id="add-error" class="banner bad" style="display: none; margin-top: 12px"></div>
+          <p class="note" style="margin: 12px 0 0">
+            Saved to <code>config.json</code> immediately. A change reaches the RPC subscriptions
+            the next time you press <strong>Start</strong> — not mid-run.
+          </p>
+        </div>
+      </section>
+
+      <section>
+        <h2>Decision parameters (offline analysis)</h2>
+        <div class="body">
+          <form class="form" id="params-form" style="grid-template-columns: 1fr 1fr auto">
+            <label style="display: block">
+              <span class="note">M — wallets_screened</span>
+              <input id="f-m" class="mono" type="number" min="1" step="1" />
+            </label>
+            <label style="display: block">
+              <span class="note">TAU — ev_threshold (fraction)</span>
+              <input id="f-tau" class="mono" type="number" min="0" step="0.001" />
+            </label>
+            <button type="submit" style="align-self: end">Save</button>
+          </form>
+          <div id="params-error" class="banner bad" style="display: none; margin-top: 12px"></div>
+          <p class="note" style="margin: 12px 0 0">
+            <strong>Not read by the bot.</strong> These feed
+            <code>analysis/part1_decide.py</code> only — the tracker runs
+            <code>mirror</code> and the guard layer, and never sizes from the master
+            equation. M counts every wallet that <em>could</em> have surfaced, not the
+            number you clicked.
+          </p>
+          <p class="note" id="params-locked" style="margin: 6px 0 0"></p>
+        </div>
+      </section>
+
+      <section>
+        <h2>Watchlist</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>Wallet</th>
+              <th>Added</th>
+              <th>Watching</th>
+              <th class="right">&nbsp;</th>
+            </tr>
+          </thead>
+          <tbody id="wallets"></tbody>
+        </table>
+        <div class="empty" id="wallets-empty">
+          No wallets yet. Add one above — with an empty watchlist the bot observes nothing.
+        </div>
+      </section>
+
+      <section>
+        <h2>Live events</h2>
+        <div id="log"><div class="t">connecting…</div></div>
+      </section>
+    </div>
+
+    <script>
+      const $ = (id) => document.getElementById(id);
+      const short = (a) => `${a.slice(0, 6)}…${a.slice(-6)}`;
+      const esc = (s) =>
+        String(s).replace(/[&<>"']/g, (c) =>
+          ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c],
+        );
+
+      let state = null;
+      let walletData = { wallets: [], pendingRestart: false, applied: [] };
+      /** Last failed lifecycle action, shown as a banner. See `fail()`. */
+      let failure = null;
+
+      async function api(path, options = {}) {
+        // The content-type is set only when there is a body. Fastify rejects a
+        // POST that declares application/json and sends nothing, which is every
+        // lifecycle route — /start, /stop and DELETE all take no body.
+        const response = await fetch(path, {
+          ...options,
+          headers: options.body ? { 'content-type': 'application/json' } : {},
+        });
+        const text = await response.text();
+        let body = {};
+        try {
+          body = text ? JSON.parse(text) : {};
+        } catch {
+          body = { message: text };
+        }
+        if (!response.ok) throw new Error(body.message || body.error || `HTTP ${response.status}`);
+        return body;
+      }
+
+      // -- render -----------------------------------------------------------
+
+      function renderState() {
+        if (!state) return;
+        const mode = $('b-mode');
+        mode.textContent = `mode ${state.mode}`;
+        mode.className = 'badge ' + (state.mode === 'paper' ? 'good' : 'bad');
+
+        const status = $('b-status');
+        status.textContent = `status ${state.status}`;
+        status.className =
+          'badge ' + (state.status === 'running' ? 'good' : state.status === 'idle' ? '' : 'warn');
+
+        $('b-positions').textContent = `${state.openPositions} open`;
+
+        $('btn-start').disabled = state.status !== 'idle';
+        $('btn-stop').disabled = state.status === 'idle';
+
+        const banners = [];
+        if (failure) {
+          banners.push(`<div class="banner bad">${esc(failure)}</div>`);
+        }
+        if (state.killSwitchEngaged) {
+          banners.push(
+            `<div class="banner bad"><strong>Kill switch engaged.</strong> No new positions will be opened. Releasing it is a console action, not an API call.</div>`,
+          );
+        }
+        if (state.unacknowledgedOrphans > 0) {
+          banners.push(
+            `<div class="banner bad"><strong>${state.unacknowledgedOrphans} unacknowledged orphan(s).</strong> Every buy is blocked until <code>npm run orphans</code> clears them.</div>`,
+          );
+        }
+        if (walletData.pendingRestart) {
+          banners.push(
+            `<div class="banner warn"><strong>Watchlist changed since this run started.</strong> The stream is still subscribed to the old set — press Stop then Start to apply.</div>`,
+          );
+        }
+        if (walletData.wallets.filter((w) => w.enabled).length === 0) {
+          banners.push(
+            `<div class="banner info">Nothing is being watched. An empty watchlist is a valid run — it just observes nothing.</div>`,
+          );
+        }
+        $('banners').innerHTML = banners.join('');
+      }
+
+      function renderWallets() {
+        const rows = walletData.wallets;
+        $('wallets-empty').style.display = rows.length ? 'none' : 'block';
+        // `applied` is the last set a run subscribed to and is not cleared on
+        // stop — it is history, not liveness. A row is only live if a run is
+        // also currently up, or a stopped bot would claim to be watching.
+        const running = state?.status === 'running';
+        $('wallets').innerHTML = rows
+          .map((wallet) => {
+            const live = running && walletData.applied.includes(wallet.address);
+            const name = wallet.label ? esc(wallet.label) : '<span class="note">unlabelled</span>';
+            return `<tr>
+              <td>
+                <div class="label">${name}</div>
+                <div class="addr" title="${esc(wallet.address)}">${esc(short(wallet.address))}</div>
+                ${wallet.note ? `<div class="note">${esc(wallet.note)}</div>` : ''}
+              </td>
+              <td class="note">${new Date(wallet.addedAt).toLocaleDateString()}</td>
+              <td>
+                <label class="toggle">
+                  <input type="checkbox" data-toggle="${esc(wallet.address)}" ${wallet.enabled ? 'checked' : ''} />
+                  ${wallet.enabled ? (live ? 'live' : 'on next start') : 'muted'}
+                </label>
+              </td>
+              <td class="right">
+                <button class="tiny" data-copy="${esc(wallet.address)}">Copy</button>
+                <button class="tiny danger" data-remove="${esc(wallet.address)}">Remove</button>
+              </td>
+            </tr>`;
+          })
+          .join('');
+      }
+
+      // -- load -------------------------------------------------------------
+
+      let params = null;
+      let paramsDirty = false;
+
+      function renderParams() {
+        if (!params) return;
+        // Don't clobber what the operator is mid-way through typing.
+        if (!paramsDirty) {
+          $('f-m').value = params.wallets_screened;
+          $('f-tau').value = params.ev_threshold;
+        }
+        const n = (params.changeLog || []).length;
+        const when = params.lockedAt ? new Date(params.lockedAt).toLocaleString() : 'never';
+        // The ordering is the point: a threshold chosen after seeing the EV is
+        // not a threshold. Surfacing the change count makes that visible.
+        $('params-locked').innerHTML =
+          `Locked at ${esc(when)} · ${n} change${n === 1 ? '' : 's'} recorded` +
+          (n > 1
+            ? ' — <strong>changed more than once.</strong> Re-running an analysis after' +
+              ' moving TAU is how a rejection becomes an approval without new evidence.'
+            : '');
+      }
+
+      $('params-form').addEventListener('submit', async (event) => {
+        event.preventDefault();
+        const error = $('params-error');
+        error.style.display = 'none';
+        try {
+          params = await api('/analysis-params', {
+            method: 'PUT',
+            body: JSON.stringify({
+              wallets_screened: Number($('f-m').value),
+              ev_threshold: Number($('f-tau').value),
+              note: 'edited from the screener',
+            }),
+          });
+          paramsDirty = false;
+          renderParams();
+        } catch (cause) {
+          error.textContent = cause.message;
+          error.style.display = 'block';
+        }
+      });
+
+      for (const id of ['f-m', 'f-tau']) {
+        $(id).addEventListener('input', () => {
+          paramsDirty = true;
+        });
+      }
+
+      async function refresh() {
+        const [s, w, p] = await Promise.all([
+          api('/state'),
+          api('/wallets'),
+          api('/analysis-params').catch(() => null),
+        ]);
+        state = s;
+        walletData = w;
+        if (p) params = p;
+        renderWallets();
+        renderState();
+        renderParams();
+      }
+
+      // -- actions ----------------------------------------------------------
+
+      $('add-form').addEventListener('submit', async (event) => {
+        event.preventDefault();
+        const error = $('add-error');
+        error.style.display = 'none';
+        try {
+          await api('/wallets', {
+            method: 'POST',
+            body: JSON.stringify({
+              address: $('f-address').value.trim(),
+              label: $('f-label').value.trim(),
+            }),
+          });
+          $('f-address').value = '';
+          $('f-label').value = '';
+          await refresh();
+        } catch (cause) {
+          error.textContent = cause.message;
+          error.style.display = 'block';
+        }
+      });
+
+      document.addEventListener('click', async (event) => {
+        const target = event.target;
+        if (target.dataset?.copy) {
+          await navigator.clipboard.writeText(target.dataset.copy);
+          const previous = target.textContent;
+          target.textContent = 'Copied';
+          setTimeout(() => (target.textContent = previous), 900);
+        }
+        if (target.dataset?.remove) {
+          const address = target.dataset.remove;
+          if (!confirm(`Stop tracking ${short(address)}?\n\nOpen positions are untouched — this only stops watching.`)) return;
+          await api(`/wallets/${address}`, { method: 'DELETE' });
+          await refresh();
+        }
+      });
+
+      document.addEventListener('change', async (event) => {
+        const address = event.target.dataset?.toggle;
+        if (!address) return;
+        await api(`/wallets/${address}`, {
+          method: 'PATCH',
+          body: JSON.stringify({ enabled: event.target.checked }),
+        });
+        await refresh();
+      });
+
+      $('btn-refresh').addEventListener('click', () => refresh());
+
+      /**
+       * Surfaced in the page, not in `alert()`. A modal dialog is suppressed
+       * outright in some embedded browsers, which turns a failed Start into a
+       * button that silently does nothing.
+       */
+      function fail(message) {
+        failure = message;
+        renderState();
+      }
+
+      $('btn-start').addEventListener('click', async () => {
+        failure = null;
+        $('btn-start').disabled = true;
+        try {
+          await api('/start', { method: 'POST' });
+        } catch (cause) {
+          fail(`Start failed: ${cause.message}`);
+        }
+        await refresh();
+      });
+
+      $('btn-stop').addEventListener('click', async () => {
+        failure = null;
+        $('btn-stop').disabled = true;
+        try {
+          await api('/stop', { method: 'POST' });
+        } catch (cause) {
+          fail(`Stop failed: ${cause.message}`);
+        }
+        await refresh();
+      });
+
+      // -- live feed --------------------------------------------------------
+
+      const log = $('log');
+      function append(type, detail) {
+        const line = document.createElement('div');
+        const stamp = new Date().toLocaleTimeString();
+        line.innerHTML = `<span class="t">${stamp}</span> <span class="k">${esc(type)}</span> ${esc(detail)}`;
+        log.append(line);
+        while (log.childElementCount > 300) log.firstElementChild.remove();
+        log.scrollTop = log.scrollHeight;
+      }
+
+      const events = new EventSource('/events');
+      events.onopen = () => {
+        log.innerHTML = '';
+        append('connected', '');
+      };
+      events.onerror = () => append('disconnected', 'retrying…');
+      const FEED = [
+        'swap-detected',
+        'intent-created',
+        'fill',
+        'rejection',
+        'route-lost',
+        'sellability-degraded',
+        'state-change',
+        'reconciled',
+        'strategy-error',
+        'swap-unparsed',
+        'stream-disconnected',
+        'stream-reconnected',
+        'stream-gap-filled',
+        'error',
+      ];
+      for (const type of FEED) {
+        events.addEventListener(type, (message) => {
+          let detail = message.data;
+          try {
+            detail = JSON.stringify(JSON.parse(message.data).data ?? {});
+          } catch {}
+          append(type, detail);
+          if (type === 'state-change' || type === 'reconciled') refresh();
+        });
+      }
+
+      $('origin').textContent = location.origin;
+      refresh().catch((cause) => {
+        $('banners').innerHTML = `<div class="banner bad">Cannot reach the API: ${esc(cause.message)}</div>`;
+      });
+      setInterval(() => refresh().catch(() => {}), 10_000);
+    </script>
+  </body>
+</html>

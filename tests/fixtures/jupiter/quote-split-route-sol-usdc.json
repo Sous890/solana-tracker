@@ -1,0 +1,74 @@
+{
+  "recordedAt": "2026-08-03T15:49:14.885Z",
+  "request": {
+    "url": "https://lite-api.jup.ag/swap/v1/quote?inputMint=So11111111111111111111111111111111111111112&outputMint=EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v&amount=…&slippageBps=50&swapMode=ExactIn&restrictIntermediateTokens=true"
+  },
+  "status": 200,
+  "body": {
+    "inputMint": "So11111111111111111111111111111111111111112",
+    "inAmount": "999999999999999999",
+    "outputMint": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+    "outAmount": "8073125425337",
+    "otherAmountThreshold": "8032759798211",
+    "swapMode": "ExactIn",
+    "slippageBps": 50,
+    "platformFee": null,
+    "priceImpactPct": "0.9998903062951085780341493727",
+    "routePlan": [
+      {
+        "swapInfo": {
+          "ammKey": "FLckHLGMJy5gEoXWwcE68Nprde1D4araK4TGLw4pQq2n",
+          "label": "TesseraV",
+          "inputMint": "So11111111111111111111111111111111111111112",
+          "outputMint": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+          "inAmount": "10000000000000000",
+          "outAmount": "1604608060054",
+          "updateContextSlot": "436999261"
+        },
+        "percent": 1,
+        "bps": null
+      },
+      {
+        "swapInfo": {
+          "ammKey": "5GGvkcqQ1554ibdc18JXiPqR8aJz6WV3JSNShoj32ufT",
+          "label": "StepN",
+          "inputMint": "So11111111111111111111111111111111111111112",
+          "outputMint": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+          "inAmount": "229999999999999999",
+          "outAmount": "1492051737167",
+          "updateContextSlot": "436997616"
+        },
+        "percent": 23,
+        "bps": null
+      },
+      {
+        "swapInfo": {
+          "ammKey": "58oQChx4yWmvKdwLLZzBi4ChoCc2fqCUWBkwMihLYQo2",
+          "label": "Raydium",
+          "inputMint": "So11111111111111111111111111111111111111112",
+          "outputMint": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+          "inAmount": "760000000000000000",
+          "outAmount": "4976465628116",
+          "updateContextSlot": "436999260"
+        },
+        "percent": 76,
+        "bps": null
+      }
+    ],
+    "contextSlot": 436999261,
+    "timeTaken": 0.054086597,
+    "swapUsdValue": "73579675753.772699926420324246",
+    "mostReliableAmmsQuoteReport": {
+      "info": {
+        "Czfq3xZZDmsdGdUyrNLtRhGc47cXcZtLG4crryfu44zE": "AnchorError { error_name: \"TickArraySequenceInvalidIndex\", error_code_number: 6038, error_msg: \"Invalid index for tick array sequence\", error_origin: None, compared_values: None }",
+        "BZtgQEyS6eXUXicYPHecYQ7PybqodXQMvkjUbP4R8mUU": "348032764910"
+      }
+    },
+    "longtailMarketQuoteReport": null,
+    "useIncurredSlippageForQuoting": null,
+    "useRewards": null,
+    "otherRoutePlans": null,
+    "loadedLongtailToken": false,
+    "instructionVersion": null
+  }
+}

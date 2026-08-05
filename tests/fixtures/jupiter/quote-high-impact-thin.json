@@ -1,0 +1,88 @@
+{
+  "recordedAt": "2026-08-03T15:49:15.849Z",
+  "request": {
+    "url": "https://lite-api.jup.ag/swap/v1/quote?inputMint=So11111111111111111111111111111111111111112&outputMint=DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263&amount=…&slippageBps=5000&swapMode=ExactIn&restrictIntermediateTokens=true"
+  },
+  "status": 200,
+  "body": {
+    "inputMint": "So11111111111111111111111111111111111111112",
+    "inAmount": "500000000000",
+    "outputMint": "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263",
+    "outAmount": "1232762284227171",
+    "otherAmountThreshold": "616381142113586",
+    "swapMode": "ExactIn",
+    "slippageBps": 5000,
+    "platformFee": null,
+    "priceImpactPct": "0.0447374911023485938612590363",
+    "routePlan": [
+      {
+        "swapInfo": {
+          "ammKey": "5zpyutJu9ee6jFymDGoK7F6S5Kczqtc9FomP3ueKuyA9",
+          "label": "Whirlpool",
+          "inputMint": "So11111111111111111111111111111111111111112",
+          "outputMint": "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263",
+          "inAmount": "165000000000",
+          "outAmount": "407254688726160",
+          "updateContextSlot": "436999223"
+        },
+        "percent": 33,
+        "bps": null
+      },
+      {
+        "swapInfo": {
+          "ammKey": "7T5BKFBFLGSgVBKKcBwrrUTHPtpVGvorKfmYuS4TzdfV",
+          "label": "Scorch",
+          "inputMint": "So11111111111111111111111111111111111111112",
+          "outputMint": "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN",
+          "inAmount": "60000000000",
+          "outAmount": "22992600730",
+          "updateContextSlot": "436999265"
+        },
+        "percent": 12,
+        "bps": null
+      },
+      {
+        "swapInfo": {
+          "ammKey": "4UcZrPsyYVaY4Rt4ebCPwEyxn1VAhw5nXhF3e3PGCB4v",
+          "label": "Meteora DLMM",
+          "inputMint": "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN",
+          "outputMint": "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263",
+          "inAmount": "22992600730",
+          "outAmount": "147768971497917",
+          "updateContextSlot": "436999166"
+        },
+        "percent": 100,
+        "bps": null
+      },
+      {
+        "swapInfo": {
+          "ammKey": "6oFWm7KPLfxnwMb3z5xwBoXNSPP3JJyirAPqPSiVcnsp",
+          "label": "Meteora DLMM",
+          "inputMint": "So11111111111111111111111111111111111111112",
+          "outputMint": "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263",
+          "inAmount": "275000000000",
+          "outAmount": "677738624003094",
+          "updateContextSlot": "436999234"
+        },
+        "percent": 55,
+        "bps": null
+      }
+    ],
+    "contextSlot": 436999265,
+    "timeTaken": 0.399583522,
+    "swapUsdValue": "36789.858439769000",
+    "mostReliableAmmsQuoteReport": {
+      "info": {
+        "C8Gr6AUuq9hEdSYJzoEpNcdjpojPZwqG5MtQbeouNNwg": "189727213868",
+        "Czfq3xZZDmsdGdUyrNLtRhGc47cXcZtLG4crryfu44zE": "36788371660",
+        "5zpyutJu9ee6jFymDGoK7F6S5Kczqtc9FomP3ueKuyA9": "AnchorError { error_name: \"TickArraySequenceInvalidIndex\", error_code_number: 6038, error_msg: \"Invalid index for tick array sequence\", error_origin: None, compared_values: None }"
+      }
+    },
+    "longtailMarketQuoteReport": null,
+    "useIncurredSlippageForQuoting": null,
+    "useRewards": null,
+    "otherRoutePlans": null,
+    "loadedLongtailToken": false,
+    "instructionVersion": null
+  }
+}

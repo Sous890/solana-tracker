@@ -1,0 +1,31 @@
+{
+  "synthetic": true,
+  "why": "No live mint yields outAmount > 2^53; see README.md. Value is 1e16+1 so Number() coercion is detectable (Number(10000000000000001) === 10000000000000000).",
+  "status": 200,
+  "body": {
+    "inputMint": "So11111111111111111111111111111111111111112",
+    "inAmount": "100000000",
+    "outputMint": "Th1nMint9Decimals11111111111111111111111111",
+    "outAmount": "10000000000000001",
+    "otherAmountThreshold": "9950000000000001",
+    "swapMode": "ExactIn",
+    "slippageBps": 50,
+    "platformFee": null,
+    "priceImpactPct": "0.0000358961947259951525246234",
+    "routePlan": [
+      {
+        "swapInfo": {
+          "ammKey": "SyntheticAmm1111111111111111111111111111111",
+          "label": "Raydium",
+          "inputMint": "So11111111111111111111111111111111111111112",
+          "outputMint": "Th1nMint9Decimals11111111111111111111111111",
+          "inAmount": "100000000",
+          "outAmount": "10000000000000001"
+        },
+        "percent": 100,
+        "bps": null
+      }
+    ],
+    "contextSlot": 400000000
+  }
+}

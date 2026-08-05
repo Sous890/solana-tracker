@@ -1,0 +1,12 @@
+{
+  "synthetic": true,
+  "why": "Provoking a real 429 requires hammering a public API. Shape follows Jupiter's documented rate-limit response.",
+  "status": 429,
+  "headers": {
+    "retry-after": "2"
+  },
+  "body": {
+    "error": "Rate limit exceeded",
+    "errorCode": "RATE_LIMIT_EXCEEDED"
+  }
+}

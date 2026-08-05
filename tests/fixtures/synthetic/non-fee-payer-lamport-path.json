@@ -1,0 +1,94 @@
+{
+  "synthetic": true,
+  "handAuthored": true,
+  "whyNotReal": "No captured transaction was both (a) tracked on a wallet that is not the fee payer and (b) resolved through the lamport path — the one real non-fee-payer capture holds a WSOL account and so takes path 1. Without this, applying meta.fee unconditionally is caught only indirectly, via the cross-path disagreement check.",
+  "edits": [
+    "entirely hand-authored: 4 account keys, one mint delta, a token account created for W, no WSOL account"
+  ],
+  "arithmetic": {
+    "walletLamportDelta": -252039280,
+    "feePaidBy": "FeePayer1111111111111111111111111111111111",
+    "feeAmount": 5000,
+    "createdTokenAccounts": 1,
+    "rentPerAccount": 2039280,
+    "corrected": "-(250000000+2039280) + 0 fee + 2039280 rent = -250000000"
+  },
+  "wallet": "Tracked11111111111111111111111111111111111",
+  "feePayer": "FeePayer1111111111111111111111111111111111",
+  "signature": "SyntheticNonFeePayerSig",
+  "expected": {
+    "side": "buy",
+    "mint": "TokenMint1111111111111111111111111111111111",
+    "tokenAmount": "777000000",
+    "decimals": 6,
+    "solAmount": "250000000",
+    "solAmountPath": "lamport-delta",
+    "feePayer": false,
+    "ifFeeAppliedWrongly": "249995000",
+    "ifRentIgnored": "252039280"
+  },
+  "tx": {
+    "slot": 500,
+    "blockTime": 1700000000,
+    "version": 0,
+    "transaction": {
+      "signatures": [
+        "SyntheticNonFeePayerSig"
+      ],
+      "message": {
+        "accountKeys": [
+          {
+            "pubkey": "FeePayer1111111111111111111111111111111111",
+            "source": "transaction"
+          },
+          {
+            "pubkey": "Tracked11111111111111111111111111111111111",
+            "source": "transaction"
+          },
+          {
+            "pubkey": "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8",
+            "source": "transaction"
+          },
+          {
+            "pubkey": "TokenAccount11111111111111111111111111111",
+            "source": "transaction"
+          }
+        ]
+      }
+    },
+    "meta": {
+      "err": null,
+      "fee": 5000,
+      "preBalances": [
+        1000000000,
+        900000000,
+        0,
+        0
+      ],
+      "postBalances": [
+        999995000,
+        647960720,
+        0,
+        2039280
+      ],
+      "preTokenBalances": [],
+      "postTokenBalances": [
+        {
+          "accountIndex": 3,
+          "mint": "TokenMint1111111111111111111111111111111111",
+          "owner": "Tracked11111111111111111111111111111111111",
+          "programId": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+          "uiTokenAmount": {
+            "amount": "777000000",
+            "decimals": 6,
+            "uiAmount": null
+          }
+        }
+      ],
+      "loadedAddresses": {
+        "writable": [],
+        "readonly": []
+      }
+    }
+  }
+}

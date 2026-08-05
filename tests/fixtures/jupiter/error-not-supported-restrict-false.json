@@ -1,0 +1,11 @@
+{
+  "recordedAt": "2026-08-03T15:49:17.221Z",
+  "request": {
+    "url": "https://lite-api.jup.ag/swap/v1/quote?inputMint=So11111111111111111111111111111111111111112&outputMint=EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v&amount=…&slippageBps=50&swapMode=ExactIn&restrictIntermediateTokens=false"
+  },
+  "status": 400,
+  "body": {
+    "error": "Setting restrict_intermediate_tokens to false is not supported for free tier users",
+    "errorCode": "NOT_SUPPORTED"
+  }
+}

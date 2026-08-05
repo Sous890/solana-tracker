@@ -1,0 +1,11 @@
+{
+  "recordedAt": "2026-08-03T15:49:16.770Z",
+  "request": {
+    "url": "https://lite-api.jup.ag/swap/v1/quote?inputMint=So11111111111111111111111111111111111111112&outputMint=5yzhXXiWmHVjMEnRcAYbHcV8w9Ei5dWKA9JaKFHopump&amount=…&slippageBps=50&swapMode=ExactIn"
+  },
+  "status": 400,
+  "body": {
+    "error": "No routes found",
+    "errorCode": "NO_ROUTES_FOUND"
+  }
+}

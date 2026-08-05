@@ -1,0 +1,11 @@
+{
+  "recordedAt": "2026-08-03T19:54:36.439Z",
+  "mint": "11111111111111111111111111111111",
+  "forwardQuote": {
+    "status": 400,
+    "body": {
+      "error": "The token 11111111111111111111111111111111 is not tradable",
+      "errorCode": "TOKEN_NOT_TRADABLE"
+    }
+  }
+}

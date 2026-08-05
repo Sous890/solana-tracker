@@ -1,0 +1,84 @@
+{
+  "clean-spl-bonk": {
+    "owner": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+    "len": 82,
+    "mintAuthority": null,
+    "freezeAuthority": null,
+    "decimals": 5,
+    "extensions": {}
+  },
+  "clean-spl-jup": {
+    "owner": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+    "len": 82,
+    "mintAuthority": null,
+    "freezeAuthority": null,
+    "decimals": 6,
+    "extensions": {}
+  },
+  "fresh-pump-mint": {
+    "owner": "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb",
+    "len": 390,
+    "mintAuthority": null,
+    "freezeAuthority": null,
+    "decimals": 6,
+    "extensions": {
+      "metadataPointer": {
+        "len": 64
+      },
+      "tokenMetadata": {
+        "len": 152
+      }
+    }
+  },
+  "live-authorities-usdc": {
+    "owner": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+    "len": 82,
+    "mintAuthority": "BJE5MMbqXjVwjAF7oxwPYXnTXDyspzZyt4vwenNw5ruG",
+    "freezeAuthority": "7dGbd2QZcCKcTndnHcTL8q7SMVXAkp688NTQYwrRCrar",
+    "decimals": 6,
+    "extensions": {}
+  },
+  "token2022-extensions-pyusd": {
+    "owner": "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb",
+    "len": 866,
+    "mintAuthority": "8Jornc27vtAYPkwDzsZVgLQchAYyC8nD7aCNPCDV8Qk2",
+    "freezeAuthority": "2apBGMsS6ti9RyF5TwQTDswXBWskiJP2LD4cUEDqYJjk",
+    "decimals": 6,
+    "extensions": {
+      "mintCloseAuthority": {
+        "len": 32
+      },
+      "permanentDelegate": {
+        "delegate": "2apBGMsS6ti9RyF5TwQTDswXBWskiJP2LD4cUEDqYJjk"
+      },
+      "transferFeeConfig": {
+        "older": {
+          "epoch": 605,
+          "maximumFee": 0,
+          "bps": 0
+        },
+        "newer": {
+          "epoch": 605,
+          "maximumFee": 0,
+          "bps": 0
+        }
+      },
+      "confidentialTransferMint": {
+        "len": 65
+      },
+      "confidentialTransferFeeConfig": {
+        "len": 129
+      },
+      "transferHook": {
+        "authority": "2apBGMsS6ti9RyF5TwQTDswXBWskiJP2LD4cUEDqYJjk",
+        "programId": null
+      },
+      "metadataPointer": {
+        "len": 64
+      },
+      "tokenMetadata": {
+        "len": 174
+      }
+    }
+  }
+}

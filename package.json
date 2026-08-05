@@ -1,0 +1,35 @@
+{
+  "name": "solana-tracker",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Solana wallet/token tracker and paper-trading bot",
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.test.json",
+    "orphans": "tsx src/cli/orphans.ts",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "serve": "tsx src/cli/serve.ts",
+    "replay": "tsx tests/replay/run.ts",
+    "soak": "tsx src/cli/soak.ts"
+  },
+  "dependencies": {
+    "better-sqlite3": "^12.2.0",
+    "dotenv": "^16.4.5",
+    "fastify": "^5.11.2",
+    "pino": "^9.5.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.11",
+    "@types/node": "^24.0.0",
+    "pino-pretty": "^13.0.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vitest": "^3.2.0"
+  }
+}

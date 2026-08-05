@@ -1,0 +1,89 @@
+{
+  "failed-swap": {
+    "reason": "TX_FAILED"
+  },
+  "meteora-dlmm-buy": {
+    "wallet": "ALWoCZLLgsgnnexGo7YKCnF4MuLHMe5vA9vNYS7YNnVw",
+    "side": "buy",
+    "mint": "3f9LEP4RNM1yq5VnCD1LYMvq7FZis5tfGqyZMsiRpump",
+    "tokenAmount": "6296",
+    "decimals": 6,
+    "solAmount": "657",
+    "path": "lamport-delta",
+    "venue": "meteora-dlmm",
+    "feePayer": true,
+    "wsol": "0",
+    "lam": "-657",
+    "slot": 437004442
+  },
+  "pumpfun-sell": {
+    "wallet": "3AinDffrsMVJZFoLTCaT9Qpb4d1jn197AeqicYYCqUqX",
+    "side": "sell",
+    "mint": "58LEnpP8a8NR7qD44EnGJhasWCXkXYHGLUvH6wyppump",
+    "tokenAmount": "204931000000",
+    "decimals": 6,
+    "solAmount": "8248821",
+    "path": "lamport-delta",
+    "venue": "pumpfun",
+    "feePayer": true,
+    "wsol": null,
+    "lam": "8248821",
+    "slot": 437004421
+  },
+  "raydium-clmm-buy": {
+    "wallet": "ESuvjvsQtjuxC4XGsDeMhx8Wp5yjQcCFGncGhupcJbg8",
+    "side": "buy",
+    "mint": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+    "tokenAmount": "1061",
+    "decimals": 6,
+    "solAmount": "1000",
+    "path": "lamport-delta",
+    "venue": "raydium-clmm",
+    "feePayer": true,
+    "wsol": "0",
+    "lam": "-1000",
+    "slot": 437004394
+  },
+  "raydium-v4-buy": {
+    "wallet": "5uUdoAb5BgKNA6YY2pHspGkEt7BeeYRhHp2MTd9KdDS4",
+    "side": "buy",
+    "mint": "3anzRVkaLmsrF84pTPS6co9EvJFio2X3zf3nHVTmpump",
+    "tokenAmount": "460106833473",
+    "decimals": 6,
+    "solAmount": "503500047",
+    "path": "lamport-delta",
+    "venue": "raydium-v4",
+    "feePayer": true,
+    "wsol": null,
+    "lam": "-503500047",
+    "slot": 437004335
+  },
+  "wallet-key-from-lookup-table": {
+    "wallet": "6b5LxeDVxqCGAhZjjjgieGP71c5GBt2cBwiafCFX6NMU",
+    "side": "buy",
+    "mint": "USD1ttGY1N17NEEHLmELoaybftRBUSErhqYiQzvEmuB",
+    "tokenAmount": "140922",
+    "decimals": 6,
+    "solAmount": "1913325",
+    "path": "wsol-token-delta",
+    "venue": "raydium-clmm",
+    "feePayer": false,
+    "wsol": "1913325",
+    "lam": "0",
+    "slot": 437004395
+  },
+  "whirlpool-buy": {
+    "wallet": "9jHrTCwpDANHLNQz5cem6XLUBM8KiTWKe766Br6KVCXM",
+    "side": "buy",
+    "mint": "pumpCmXqMfrsAkQ5r49WcJnRayYRqmXz6ae8H7H9Dfn",
+    "tokenAmount": "5107721920",
+    "decimals": 6,
+    "solAmount": "145736102",
+    "path": "lamport-delta",
+    "venue": "whirlpool",
+    "feePayer": true,
+    "wsol": null,
+    "lam": "-145736102",
+    "slot": 437004422
+  }
+}
