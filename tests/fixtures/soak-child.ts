@@ -33,7 +33,24 @@ if (dbPath === undefined || sessionDir === undefined || mode === undefined) {
   process.exit(2);
 }
 
+/** The mint the churn loop trades. Its position opens and closes constantly. */
 const MINT = 'DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263';
+/**
+ * A second mint, bought once and never sold — the position the crash drill is
+ * actually about.
+ *
+ * The drill asserts that a position taken before the crash survives it. It used
+ * to assert that against `MINT`, whose position the churn loop below opens and
+ * closes on a ~10ms cycle, so whether anything was open when the SIGKILL landed
+ * was a coin flip on the phase of that cycle rather than a property of the
+ * ledger. Measured: the position was flat for 49.3% of the parent's kill
+ * window, and the test failed 9/30 runs isolated and 19/30 under load.
+ *
+ * The tracked wallet never sells this one and `noScheduler` means no price
+ * ticks, so nothing in the system can close it. `maxConcurrentPositions`
+ * defaults to 3, so holding it alongside the churn position is within the cap.
+ */
+const ANCHOR_MINT = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
 const WALLET = '7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU';
 const BUY_OUT = 1_000_000_000n;
 
@@ -60,10 +77,10 @@ function quoteOf(request: QuoteRequest, out: bigint, at: number): Quote {
   };
 }
 
-function swapOf(side: 'buy' | 'sell', index: number): TrackedSwap {
+function swapOf(side: 'buy' | 'sell', index: number, mint: string = MINT): TrackedSwap {
   return {
     wallet: WALLET,
-    mint: MINT,
+    mint,
     side,
     solAmount: 410_000_000n,
     tokenAmount: BUY_OUT,
@@ -117,7 +134,9 @@ const screener = {
   }),
 };
 
-const resolveDecimals = createDecimalsResolver(fixtureDecimalsSource({ [MINT]: 6 }));
+const resolveDecimals = createDecimalsResolver(
+  fixtureDecimalsSource({ [MINT]: 6, [ANCHOR_MINT]: 6 }),
+);
 
 const broker = createPaperBroker({
   quoteSource: quotes,
@@ -212,18 +231,49 @@ tracker.useStrategy(runner);
 
 await tracker.start();
 
-// Announce readiness only once a complete round trip is on disk, so the parent
-// kills a process that has something worth losing.
-stream.emit('swap', swapOf('buy', 1));
-await new Promise((resolve) => setTimeout(resolve, 60));
-stream.emit('swap', swapOf('sell', 1));
-await new Promise((resolve) => setTimeout(resolve, 60));
+/**
+ * Poll the ledger until `probe` reports the state we are waiting for.
+ *
+ * Replaces a fixed `setTimeout`, which under load announced READY before the
+ * trades it claimed were on disk had been written at all. A timeout here is a
+ * genuine regression — the tracker stopped filling — so it exits loudly with a
+ * distinct message rather than letting the parent read it as a flake.
+ */
+async function waitForLedger(what: string, probe: () => boolean): Promise<void> {
+  const deadline = Date.now() + 30_000;
+  while (!probe()) {
+    if (Date.now() > deadline) {
+      writeSync(2, `SOAK-CHILD GAVE UP: ${what} did not happen within 30000ms\n`);
+      process.exit(3);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+}
+
+const isOpen = (mint: string): boolean =>
+  ledger.getOpenPositions().some((position) => position.mint === mint && position.tokens > 0n);
+
+// 1. Take the position that must survive the crash, and do not announce
+//    readiness until the ledger actually shows it open. This is the thing the
+//    parent's assertion is about, so "it exists" has to be observed, not
+//    assumed from a sleep.
+stream.emit('swap', swapOf('buy', 1, ANCHOR_MINT));
+await waitForLedger(`a position in ${ANCHOR_MINT} opened`, () => isOpen(ANCHOR_MINT));
+
+// 2. A complete round trip on the churn mint, so the session holds a buy, a
+//    sell and their quotes before anybody is killed.
 stream.emit('swap', swapOf('buy', 2));
-await new Promise((resolve) => setTimeout(resolve, 60));
+await waitForLedger('the churn buy filled', () => isOpen(MINT));
+stream.emit('swap', swapOf('sell', 2));
+await waitForLedger('the churn sell filled', () => !isOpen(MINT));
 
 writeSync(1, `READY ${tracker.session?.path ?? ''}\n`);
 
 // Keep trading until killed. Never resolves; that is the point.
+//
+// Only the churn mint is traded here. The anchor position stays open however
+// long this runs, so the parent can kill at an arbitrary moment — which is what
+// makes it a crash — without the surviving-position assertion depending on when.
 let index = 3;
 setInterval(() => {
   stream.emit('swap', swapOf(index % 2 === 0 ? 'buy' : 'sell', index));

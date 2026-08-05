@@ -312,6 +312,20 @@ export class SessionRecorder {
   private seq = 0;
   private closed = false;
 
+  /**
+   * One entry per stream this recorder has called `end()` on, resolving when
+   * that stream has actually finished writing.
+   *
+   * `close()` used to await only `this.stream`, so a stream rotated away from
+   * was ended and then forgotten while it still held buffered bytes. `close()`
+   * would resolve with an earlier session file short — or, when the rotation
+   * had only just happened, still zero bytes on disk. That is a `seq` gap, and
+   * the replay loader refuses a session with a gap, so a clean shutdown could
+   * quietly produce an unreplayable session. Measured at 51/300 closes losing
+   * lines before this set existed.
+   */
+  private readonly flushing = new Set<Promise<void>>();
+
   readonly stats = {
     written: 0,
     dropped: 0,
@@ -400,7 +414,10 @@ export class SessionRecorder {
     if (!bySize && !byDate) return;
 
     const previous = this.stream;
-    previous.end();
+    // Tracked, not awaited. Rotation stays on the synchronous emit path — the
+    // live path must never wait on a file — but `close()` can now wait for
+    // this file to finish, which is the only way `close()` can mean "on disk".
+    void this.endStream(previous);
     this.rotation += 1;
     this.stats.rotations += 1;
     this.utcDate = today;
@@ -600,11 +617,35 @@ export class SessionRecorder {
     });
   }
 
-  /** Flush and close. Safe to call twice. */
+  /**
+   * End one stream, and remember it until it has finished writing.
+   *
+   * Resolves on `error` as well as on completion: the stream already has an
+   * error handler that counts and logs rather than throwing, and a stream that
+   * failed will never emit `finish`. Waiting for one that cannot arrive would
+   * turn a failed write into a shutdown that hangs.
+   */
+  private endStream(stream: WriteStream): Promise<void> {
+    const finished = new Promise<void>((resolve) => {
+      stream.end(() => resolve());
+      stream.once('error', () => resolve());
+    });
+    this.flushing.add(finished);
+    void finished.then(() => this.flushing.delete(finished));
+    return finished;
+  }
+
+  /**
+   * Flush and close. Safe to call twice.
+   *
+   * Awaits every file this recorder opened, not just the current one. See
+   * `flushing` for what that fixes.
+   */
   async close(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
-    await new Promise<void>((resolve) => this.stream.end(resolve));
+    void this.endStream(this.stream);
+    await Promise.all([...this.flushing]);
   }
 
   /** p50 / p99 / max of time spent inside `write`, in nanoseconds. */

@@ -23,6 +23,8 @@ import { replaySession } from './replay/run.js';
 const HERE = dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = resolve(HERE, '..');
 const MINT = 'DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263';
+/** Must match `ANCHOR_MINT` in `tests/fixtures/soak-child.ts`. */
+const ANCHOR_MINT = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
 const T0 = 1_700_000_000_000;
 
 const dirs: string[] = [];
@@ -492,7 +494,9 @@ describe('crash drill', () => {
   }
 
   /**
-   * SKIPPED IN THE SUITE, AND RUN BY HAND. Both halves of that are deliberate.
+   * RUNS IN THE SUITE. The header here used to say it was skipped and run by
+   * hand; it was never `it.skip`, so that was describing an intention rather
+   * than the file, and it is the sort of note that makes a red run arguable.
    *
    * It spawns a real `npx tsx` child, SIGKILLs it, and replays a ~3,700-line
    * session twice in-process. Running alongside the other spawn-based tests it
@@ -501,13 +505,13 @@ describe('crash drill', () => {
    * test. Serialising the whole suite fixed those and tripled the runtime, so
    * that was reverted too.
    *
-   * Verified manually on 2026-08-04 — see docs/handoffs/13-soak.md for the
-   * transcript:
+   * What it establishes, verified across 30 isolated and 30 contended runs on
+   * 2026-08-05 — see docs/handoffs/18-flake-mechanisms.md:
    *   - every session file in sessionDir parsed, including the truncated tail
    *   - the pre-crash file replayed to a stable SHA-256
-   *   - the restart reported the surviving open position (1,000,000,000 units)
+   *   - the restart reported the surviving anchor position (1,000,000,000 units)
    *
-   * Run it with:  npx vitest run tests/soak.test.ts -t "SIGKILL"
+   * Run it alone with:  npx vitest run tests/soak.test.ts -t "SIGKILL"
    */
   it(
     'survives a real SIGKILL: positions, intents, sessions and the replay hash',
@@ -532,10 +536,25 @@ describe('crash drill', () => {
         child.stderr.on('data', (chunk: Buffer) => {
           buffer += chunk.toString();
         });
+        // The child now gives up loudly rather than announcing a readiness it
+        // has not reached. Surfacing that here, instead of waiting out the 45s
+        // timeout, keeps a real regression — the tracker stopped filling —
+        // legible as itself rather than as "the machine was busy".
+        child.on('exit', (code) => {
+          clearTimeout(timer);
+          rejectReady(new Error(`child exited (${code}) before READY: ${buffer}`));
+        });
       });
 
       // A random point inside a 60s window, scaled to keep the suite usable:
       // the property under test is "killed mid-write", not the wall time.
+      //
+      // Deliberately still random. It is the child that now guarantees there is
+      // something to lose — it does not print READY until the ledger shows the
+      // anchor position open, and nothing it does afterwards can close that
+      // position. Before that, the only position was the churn mint's, which
+      // opens and closes on a ~10ms cycle, so this delay was sampling the phase
+      // of that cycle and the assertion below was a coin flip.
       await new Promise((r) => setTimeout(r, 50 + Math.floor(Math.random() * 250)));
       // SIGKILL, not SIGTERM. An uncatchable signal is the whole drill —
       // anything the process could have handled is a shutdown, not a crash.
@@ -619,8 +638,13 @@ describe('crash drill', () => {
         orphaned: string[];
         recovered: string[];
       };
-      // The position taken before the crash survived it.
-      expect(report.openPositions.length).toBeGreaterThan(0);
+      // The position taken before the crash survived it. Named, not counted:
+      // the churn mint may legitimately be open or flat depending on where the
+      // SIGKILL landed, so a bare count would pass on the wrong position.
+      expect(report.openPositions.map((p) => p.mint)).toContain(ANCHOR_MINT);
+      expect(
+        report.openPositions.find((p) => p.mint === ANCHOR_MINT)?.tokens,
+      ).toBe('1000000000');
 
       // A crash mid-trade may legitimately leave an orphan — that is what the
       // orphan gate is for. What must NOT survive reconciliation is an intent

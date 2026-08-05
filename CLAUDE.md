@@ -1,7 +1,7 @@
 # solana-tracker — working notes for Claude
 
 See `README.md` for architecture and `docs/handoffs/` for session history.
-`docs/handoffs/16-alpha-decay-harness.md` is the most recent.
+`docs/handoffs/18-flake-mechanisms.md` is the most recent.
 
 ## Known gaps
 
