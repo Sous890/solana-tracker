@@ -178,6 +178,17 @@ export type TrackerEventName =
   | 'stream-reconnected'
   /** A gap fill completed, with how many signatures it recovered. */
   | 'stream-gap-filled'
+  /**
+   * One signature's trip through the RPC null window: attempts and elapsed ms.
+   * The detection leg of CLAUDE.md gap 6, and a LOWER BOUND on copy delay.
+   */
+  | 'stream-fetch-window'
+  /**
+   * The fetch queue shed load. Recorded separately from the `error` it also
+   * raises, because `error` is excluded from sessions by name and this is the
+   * only measure of how much of the feed was dropped.
+   */
+  | 'stream-queue-overflow'
   | 'error';
 
 export interface TrackerEventRecord {
@@ -488,6 +499,12 @@ export class Tracker extends EventEmitter {
     });
     deps.stream.on('gap-filled', (payload: unknown) => {
       this.record('stream-gap-filled', payload);
+    });
+    deps.stream.on('fetch-window', (payload: unknown) => {
+      this.record('stream-fetch-window', payload);
+    });
+    deps.stream.on('queue-overflow', (payload: unknown) => {
+      this.record('stream-queue-overflow', payload);
     });
   }
 

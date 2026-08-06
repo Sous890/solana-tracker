@@ -76,6 +76,27 @@ export const MAX_COLD_FILL = 100;
 export const SEEN_CAPACITY = 5_000;
 export const MAX_IN_FLIGHT = 20;
 
+/**
+ * Attempts at `getTransaction` before a signature is given up on for now.
+ *
+ * `getTransaction` answers `null` for a signature the socket has only just
+ * announced: the cluster knows it, the queried node does not yet. That was
+ * handled as a bare `return` until session 21, and it cost roughly 965 swaps —
+ * 34.2% of swap-like traffic — because the signature had already been admitted
+ * to the seen-set, so gap fill could never bring it back. See handoff 20.
+ *
+ * Three, not more. The retry budget has to stay far inside `maxSignalAgeMs`
+ * (15s), or a signal gets resurrected past the point where acting on it is a
+ * different strategy than the one anybody chose. `STALE_SIGNAL` firing is the
+ * correct outcome for a genuinely slow signature, not something to engineer
+ * around. Retries are also strictly serial — `drain` awaits each `handle` — so
+ * this widens latency, never concurrency, and cannot amplify into Helius's
+ * ~10 rps ceiling.
+ */
+export const FETCH_ATTEMPTS = 3;
+/** Backoff base: waits 150ms then 300ms. Under half a second added, worst case. */
+export const FETCH_RETRY_BASE_MS = 150;
+
 // ---------------------------------------------------------------------------
 // Bounded seen-set
 // ---------------------------------------------------------------------------
@@ -91,6 +112,11 @@ export class SeenSignatures {
   private readonly entries = new Map<string, true>();
 
   constructor(private readonly capacity: number = SEEN_CAPACITY) {}
+
+  /** True if this signature has already been admitted. Marks nothing. */
+  has(signature: string): boolean {
+    return this.entries.has(signature);
+  }
 
   /** True if this signature is new. Marks it seen as a side effect. */
   admit(signature: string): boolean {
@@ -129,6 +155,42 @@ export function orderOldestFirst(entries: SignatureEntry[]): SignatureEntry[] {
 // Stream
 // ---------------------------------------------------------------------------
 
+/**
+ * One signature's trip through the null window.
+ *
+ * This is CLAUDE.md gap 6's detection leg, which `example.py` has been guessing
+ * at 1.2s. **It is a lower bound on copy delay, not the delay** — it measures
+ * only "how long until the transaction was fetchable", and excludes quote,
+ * guard and fill time entirely.
+ */
+export interface FetchWindowEvent {
+  wallet: Address;
+  signature: string;
+  /** 1 means it was fetchable immediately. */
+  attempts: number;
+  /** From first fetch attempt to the one that returned, in ms. */
+  elapsedMs: number;
+  /** False when every attempt returned null — the signature stays re-deliverable. */
+  resolved: boolean;
+  source: SwapSource;
+}
+
+/**
+ * The bounded queue shed load. Emitted alongside the `error` it has always
+ * raised, not instead of it.
+ *
+ * Before session 21 this existed only as an `error`, and `EXCLUDED_TRACKER_EVENTS`
+ * excludes `error` from recording by name — so the one number that says how much
+ * of the feed was dropped never reached a session file, and the size of the hole
+ * was unknowable after the fact. Recording it does not change the shedding.
+ */
+export interface QueueOverflowEvent {
+  wallet: Address;
+  dropped: number;
+  /** Queue depth cap that was exceeded, so a session says what it was measured against. */
+  capacity: number;
+}
+
 export interface GapFilledEvent {
   wallet: Address;
   count: number;
@@ -141,6 +203,26 @@ export class WalletStream extends EventEmitter {
     WalletStreamDeps;
 
   private readonly seen = new SeenSignatures();
+
+  /**
+   * Signatures currently being fetched. Distinct from `seen`, deliberately.
+   *
+   * `seen` now means exactly one thing: **successfully fetched and dispatched**.
+   * That is what makes "an unresolved signature must stay re-deliverable" work
+   * — gap fill re-offers anything not in `seen`, and a fetch that returned
+   * `null` leaves nothing behind.
+   *
+   * The alternative considered was admit-then-roll-back-on-failure. Rejected:
+   * it makes `seen` mean "processed OR in progress OR briefly-but-no-longer
+   * failed", and the eviction interaction with `SEEN_CAPACITY` becomes something
+   * you have to reason about rather than read.
+   *
+   * This set is not an optimisation. `gapFill` awaits `handle` directly while
+   * the socket path goes through `enqueue`/`drain`, so the two interleave for
+   * real; without it, moving admission after the fetch would let both paths
+   * fetch the same signature and emit two swaps for one trade.
+   */
+  private readonly inFlight = new Set<string>();
   private readonly queue: Array<{ wallet: Address; entry: SignatureEntry; source: SwapSource }> = [];
   private socket: StreamSocket | undefined;
   private running = false;
@@ -288,6 +370,13 @@ export class WalletStream extends EventEmitter {
       const dropped = this.queue.length - MAX_IN_FLIGHT;
       this.queue.splice(0, dropped);
       this.emit('error', Object.assign(new Error('fetch queue overflow'), { dropped }));
+      // Also as its own event, because `error` is excluded from recording by
+      // name and this is the only measurement of how much feed was shed.
+      this.emit('queue-overflow', {
+        wallet,
+        dropped,
+        capacity: MAX_IN_FLIGHT,
+      } satisfies QueueOverflowEvent);
     }
     void this.drain();
   }
@@ -320,16 +409,62 @@ export class WalletStream extends EventEmitter {
     entry: SignatureEntry,
     source: SwapSource,
   ): Promise<void> {
-    if (!this.seen.admit(entry.signature)) return;
+    if (this.seen.has(entry.signature)) return;
+    if (this.inFlight.has(entry.signature)) return;
+    this.inFlight.add(entry.signature);
 
-    let tx: ParsedTransactionWithMeta | null;
     try {
-      tx = await this.deps.rpc.getTransaction(entry.signature);
-    } catch (error) {
-      this.emit('error', error as Error);
-      return;
+      const startedAt = this.deps.now();
+      let tx: ParsedTransactionWithMeta | null = null;
+      let attempts = 0;
+
+      while (attempts < FETCH_ATTEMPTS) {
+        attempts += 1;
+        try {
+          tx = await this.deps.rpc.getTransaction(entry.signature);
+        } catch (error) {
+          // Not retried here. `rpcClient` has already exhausted its own
+          // attempts on anything transport-shaped, so a throw reaching this
+          // point is a real failure, not a slow read replica.
+          this.emit('error', error as Error);
+          return;
+        }
+        if (tx !== null) break;
+        if (attempts < FETCH_ATTEMPTS) {
+          await this.deps.sleep(FETCH_RETRY_BASE_MS * 2 ** (attempts - 1));
+        }
+      }
+
+      // Emitted whether or not it resolved: the share that never resolves is
+      // as much a part of the detection-leg distribution as the latencies are.
+      this.emit('fetch-window', {
+        wallet,
+        signature: entry.signature,
+        attempts,
+        elapsedMs: this.deps.now() - startedAt,
+        resolved: tx !== null,
+        source,
+      } satisfies FetchWindowEvent);
+
+      // Deliberately NOT admitted. The signature stays re-deliverable, which is
+      // the entire fix: a transaction that was merely early gets another chance
+      // from the next gap fill instead of leaving the corpus for good.
+      if (tx === null) return;
+
+      this.seen.admit(entry.signature);
+      await this.dispatch(wallet, entry, tx, source);
+    } finally {
+      this.inFlight.delete(entry.signature);
     }
-    if (tx === null) return;
+  }
+
+  /** Parse one fetched transaction, emit it, and advance the cursor. */
+  private async dispatch(
+    wallet: Address,
+    entry: SignatureEntry,
+    tx: ParsedTransactionWithMeta,
+    source: SwapSource,
+  ): Promise<void> {
 
     // Stamped here, after the fetch, so `observedAt` is when this process
     // actually had the transaction in hand — not when the signature was queued.

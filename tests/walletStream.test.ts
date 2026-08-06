@@ -489,3 +489,144 @@ describe('source stamping', () => {
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// The null window
+// ---------------------------------------------------------------------------
+
+/**
+ * `getTransaction` routinely answers `null` for a signature the socket has only
+ * just announced — the transaction is known to the validator but not yet
+ * queryable. Session 20 measured what that cost: roughly 965 swaps, 34.2% of
+ * swap-like traffic, gone from the corpus permanently, because the signature was
+ * admitted to the seen-set BEFORE the fetch and the gap fill could never
+ * re-deliver it.
+ */
+describe('null window', () => {
+  it('retries a null fetch and parses the signature exactly once', async () => {
+    const history = entries(1);
+    let calls = 0;
+    const rpc: RpcClient = {
+      getSignaturesForAddress: async () => history,
+      getTransaction: async (signature) => {
+        calls += 1;
+        // The window: known to the cluster, not yet returnable.
+        if (calls === 1) return null;
+        const entry = history.find((e) => e.signature === signature)!;
+        return txFor(signature, entry.slot);
+      },
+    };
+    const h = harness(rpc, () => fakeSocket().socket);
+    try {
+      await h.stream.start();
+      expect(h.swaps.map((s) => s.signature)).toEqual(['sig-1']);
+      expect(calls).toBeGreaterThan(1);
+    } finally {
+      h.close();
+    }
+  });
+
+  it('does NOT admit a signature that never resolves, so a later gap fill retries it', async () => {
+    const history = entries(1);
+    let alwaysNull = true;
+    const rpc: RpcClient = {
+      getSignaturesForAddress: async () => history,
+      getTransaction: async (signature) => {
+        if (alwaysNull) return null;
+        const entry = history.find((e) => e.signature === signature)!;
+        return txFor(signature, entry.slot);
+      },
+    };
+    const h = harness(rpc, () => fakeSocket().socket);
+    try {
+      await h.stream.start();
+      expect(h.swaps).toHaveLength(0);
+
+      // The transaction becomes fetchable, and a later gap fill re-delivers the
+      // signature rather than treating it as already handled. This is the whole
+      // point: an unresolved fetch must not consume the signature.
+      alwaysNull = false;
+      // `start()` gap-fills every wallet, which is the real trigger — the same
+      // one a reconnect uses. No test-only API.
+      await h.stream.start();
+
+      expect(h.swaps.map((s) => s.signature)).toEqual(['sig-1']);
+    } finally {
+      h.close();
+    }
+  });
+
+  it('parses once when the socket and the gap fill race the same signature', async () => {
+    // `gapFill` awaits `handle` directly while the socket path goes through the
+    // queue, so the two genuinely interleave. Admitting only after a successful
+    // fetch would let both fetch and both emit; the in-flight set is what stops
+    // that, and this is the test that would catch its removal.
+    const history = entries(1);
+    let release: (() => void) | undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let fetches = 0;
+    const sock = fakeSocket();
+    const rpc: RpcClient = {
+      getSignaturesForAddress: async () => history,
+      getTransaction: async (signature) => {
+        fetches += 1;
+        if (fetches === 1) {
+          // While the first fetch is parked, the socket announces the same
+          // signature.
+          sock.deliver('sig-1', 101);
+          await gate;
+        }
+        const entry = history.find((e) => e.signature === signature)!;
+        return txFor(signature, entry.slot);
+      },
+    };
+    const h = harness(rpc, () => sock.socket);
+    try {
+      const started = h.stream.start();
+      await new Promise((r) => setImmediate(r));
+      release!();
+      await started;
+      await new Promise((r) => setImmediate(r));
+
+      expect(h.swaps.filter((s) => s.signature === 'sig-1')).toHaveLength(1);
+      expect(fetches).toBe(1);
+    } finally {
+      h.close();
+    }
+  });
+
+  it('reports the window it measured, so the detection leg is not a guess', async () => {
+    const history = entries(1);
+    let calls = 0;
+    const rpc: RpcClient = {
+      getSignaturesForAddress: async () => history,
+      getTransaction: async (signature) => {
+        calls += 1;
+        if (calls < 3) return null;
+        const entry = history.find((e) => e.signature === signature)!;
+        return txFor(signature, entry.slot);
+      },
+    };
+    const windows: Array<{ attempts: number; resolved: boolean }> = [];
+    const cursors = openCursorStore({ path: ':memory:' });
+    const stream = new WalletStream({
+      wallets: [WALLET],
+      rpc,
+      cursors,
+      connect: async () => fakeSocket().socket,
+      now: () => 1_700_000_000_000,
+      sleep: async () => undefined,
+      random: () => 0,
+    });
+    stream.on('fetch-window', (event) => windows.push(event));
+    try {
+      await stream.start();
+      expect(windows).toHaveLength(1);
+      expect(windows[0]).toMatchObject({ attempts: 3, resolved: true });
+    } finally {
+      cursors.close();
+    }
+  });
+});
