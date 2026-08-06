@@ -14,7 +14,7 @@ simulate every fill while claiming not to. Do not create or load a keypair path.
 - `README.md` — layering, the control API, and the recorded decisions behind
   the integer money model, the orphan gate, and disk-not-chain reconciliation.
   It is current and detailed; do not re-derive it, and do not duplicate it here.
-- `docs/handoffs/` — one file per session, numbered. **`21-null-window.md`
+- `docs/handoffs/` — one file per session, numbered. **`22-subscription-routing.md`
   is the most recent.** Read the latest two before starting. They record what
   was verified from code and the database versus what was recalled, which is the
   distinction that matters most in this repo.
@@ -26,7 +26,7 @@ Node 24 is keg-only Homebrew here, so it may need to be on `PATH`:
 
 | Command | What it does |
 | --- | --- |
-| `npm test` | Full vitest suite — currently **858 tests across 21 files** |
+| `npm test` | Full vitest suite — currently **861 tests across 21 files** |
 | `npx vitest run tests/soak.test.ts` | One test file |
 | `npx vitest run tests/soak.test.ts -t "SIGKILL"` | One test by name substring |
 | `npm run typecheck` | `tsc -p tsconfig.test.json` — types `src` **and** `tests` |
@@ -176,24 +176,23 @@ Nothing local supplies it. Do not substitute first-seen-in-session.
 
 ### 6. Our own delay is only partly measured
 
-**The detection leg is now measured** (handoff 21). From `stream-fetch-window`,
-recorded per signature: live socket path, n=71, **p50 198 ms, p90 299 ms, p99
-and max 353 ms**, and 100% fetchable on the first attempt. Consistent with the
-earlier `getTransaction` round trip of p50 201 ms (n=20).
+**The detection leg is measured** (handoffs 21-22). From `stream-fetch-window`,
+live socket path, n=500: **p50 171 ms, p90 272 ms, p99 364 ms, max 652 ms**, with
+99.8% fetchable on the first attempt. Consistent across sessions (198 ms at n=71)
+and with the standalone `getTransaction` round trip of ~201 ms.
 
 **That is a LOWER BOUND on copy delay, not the delay.** It covers only the gap
-between the socket announcing a signature and this process being able to read
-it. Quote, guard and fill time are all still unmeasured, and `example.py`'s
-1.2 s assumption covers the whole path. Do not substitute one for the other.
+between the socket announcing a signature and this process being able to read it.
+Quote, guard and fill time remain unmeasured; `example.py`'s 1.2 s assumption
+covers the whole path. Do not substitute one for the other.
 
-Re-measure with `npx tsx scripts/detection-window.ts <session.jsonl>`. Read the
-`live` rows only — gap-fill signatures are minutes to hours old and were always
-fetchable, so mixing them in drags every percentile toward the round trip.
+Re-measure with `npx tsx scripts/detection-window.ts <session.jsonl>`, and read
+the `live` rows only — gap-fill signatures are minutes to hours old and were
+always fetchable, so mixing them in drags every percentile toward the round trip.
 
-The `getTransaction` null window it was feared to be is real but did not open
-once in those 71 samples. It is now retried (`FETCH_ATTEMPTS = 3`) and a
-signature is no longer admitted to the seen-set until it has actually been
-fetched.
+The `getTransaction` null window is real but rare: it opened **once in 500 live
+samples**, and the retry added in session 21 recovered it. Before that retry it
+was silent — a `null` produced no record at all.
 
 ### 7. Pre-graduation pump.fun mints break `PoolState`
 
@@ -210,45 +209,54 @@ ledger. Fixing it needs an additive nullable `signal_age_ms` column on
 backfill and do not infer an age from timestamps — a wrong number is worse than
 a missing one.
 
-### 9. Live socket notifications are attributed to the WRONG wallet
+### 9. FIXED — live notifications were attributed to the wrong wallet
 
-`walletStream.onMessage` discards the `logsSubscribe` subscription id and
-enqueues every notification for **every tracked wallet**. One notification
-becomes 13 queue entries, 12 of them for wallets with nothing to do with the
-transaction. `enqueue` then caps at `MAX_IN_FLIGHT = 20` and sheds **from the
-front**, so the last wallet in the config list survives, fetches, is not in the
-transaction, yields `WALLET_NOT_IN_TX` — and is admitted to the seen-set anyway,
-so the real swapper is deduped out and the swap is lost.
+Kept as a record because it was the most expensive bug in this repo's history and
+it was invisible to a green suite for three sessions.
 
-**Verified** (handoff 21): all 7 residual failures in the post-fix session were
-attributed to `H8sMJSCQ…`, index 12 of 13 — the last wallet — while the
-transactions were swaps by `popo3Rj6…` and `HSsJjkHr…`, with `meta` present, key
-lists matching, and the attributed wallet appearing nowhere in the transaction.
+`walletStream.onMessage` discarded the `logsSubscribe` subscription id and
+enqueued every notification for **every** tracked wallet. One notification became
+13 entries; the queue capped at `MAX_IN_FLIGHT` and shed **from the front**, so
+the last wallet in the config list survived, fetched, was not in the transaction,
+yielded `WALLET_NOT_IN_TX`, and was admitted to the seen set anyway — deduping out
+the wallet that actually traded.
 
-**This supersedes the null-window explanation** given in handoff 20. That was
-wrong: a `null` fetch produced no record at all pre-fix, so it cannot have
-produced the 1,929 `WALLET_NOT_IN_TX` records the rate was computed from.
+**Fixed in handoff 22.** Notifications now route by `params.subscription` through
+a subscription-id → wallet map, rebuilt from empty on every connect; an
+unattributable notification emits `unknown-subscription` rather than fanning out.
 
-Scale, from the pre-fix session: swap-like unparsed rate **34.2%**, ~965 swaps.
-The post-fix figure of 1.6% is **not** evidence the problem is solved — that
-window had almost no live traffic. Re-measure after fixing the attribution, with
-`npx tsx scripts/classify-unparsed.ts <session.jsonl>`.
+Measured after the fix, on live-sourced signatures only: **`WALLET_NOT_IN_TX`
+went from 42.9% of the unparsed set to zero**, 0/30 sampled live unparsed
+re-parse as swaps, and live parsed swaps rose from ~18/hour to ~86/hour.
 
-**The fix is to map subscription id → wallet** from the `logsSubscribe` reply and
-use `params.subscription` in `onMessage`. Consider also keying the seen-set by
-`(wallet, signature)`: even with correct attribution, one transaction genuinely
-involving two tracked wallets needs parsing once per wallet.
+**Two superseded explanations, recorded so they are not re-derived.** Handoff 19
+blamed nothing; handoff 20 blamed unknown venue program ids (wrong — the parser
+works from balance deltas and does not gate on program id); handoff 21 blamed the
+RPC null window (wrong — a `null` produced no record at all, so it cannot have
+generated the records the rate was computed from). Each was disproved by
+measurement, not argument.
 
-Related, now visible: `queue-overflow` is recorded under its own tag
-(`tracker:stream-queue-overflow`) rather than as an `error` the recorder excludes
-by name. It fired **30 times in one hour** on a quiet feed — the front-shedding
-step of the mechanism above.
+**Still open:** the seen set is keyed on **signature alone**, so one transaction
+genuinely involving two tracked wallets still loses the second. Session 20 found
+zero such cases in 30 sampled, so it is rare rather than absent. The fix is to key
+on `(wallet, signature)` and stop admitting `WALLET_NOT_IN_TX` — one change, not
+two — after checking the `SEEN_CAPACITY` interaction (5,000 entries over 13
+wallets is ~385 signatures per wallet).
 
-**Handoff 17 is untouched by all of this.** The wallet decision was computed from
-`calibrate-delays.ts` and `export-wallet-history.ts`, which page signatures
-themselves and call `parseSwap` directly, never through `walletStream`.
+**Queue shedding is NOT dormant.** 37 sheds in 58 minutes after the fix, against
+30 before it, even though notification volume fell ~13×. Every shed entry is now
+a correctly-routed notification rather than fan-out noise, so each one costs
+something real. Front-shedding drops the oldest pending entry, which is the one
+closest to being fetched. See handoff 22 §Task D for a proposed policy.
 
 ## Environment traps
+
+- **`data/` is the application's database directory, not scratch space.**
+  `DEFAULT_DB` is `./data/tracker.db`, and `data/wallets.json` holds watchlist
+  labels and notes. It is gitignored, which makes it a tempting place to drop a
+  diagnostic script — and session 22 did exactly that and then deleted the
+  ledger, the cursors and the runtime state with `rm -rf data`. Put scratch files
+  outside the repo. Never `rm -rf` a path under `data/`.
 
 Each of these has already cost a session.
 

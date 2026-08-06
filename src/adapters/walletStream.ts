@@ -184,6 +184,25 @@ export interface FetchWindowEvent {
  * of the feed was dropped never reached a session file, and the size of the hole
  * was unknowable after the fact. Recording it does not change the shedding.
  */
+/**
+ * A notification arrived on a subscription id this stream does not recognise.
+ *
+ * Emitted rather than guessed at. Until session 22 the id was discarded and the
+ * notification fanned out to **every** tracked wallet, which is how a swap by
+ * one wallet came to be attributed to another and then deduped out of existence
+ * — see handoff 21. Anything that cannot be attributed to exactly one wallet is
+ * now a reported event, because the alternative to knowing whose it is has been
+ * measured and it is worse than dropping it.
+ *
+ * Expected transiently around a reconnect: ids are per-connection, so a
+ * notification in flight when the socket dropped can land after resubscribe. A
+ * steady stream of these means the map is wrong.
+ */
+export interface UnknownSubscriptionEvent {
+  subscription: number | null;
+  signature: string;
+}
+
 export interface QueueOverflowEvent {
   wallet: Address;
   dropped: number;
@@ -223,6 +242,27 @@ export class WalletStream extends EventEmitter {
    * fetch the same signature and emit two swaps for one trade.
    */
   private readonly inFlight = new Set<string>();
+
+  /**
+   * JSON-RPC request id -> wallet, for subscribes awaiting their answer.
+   *
+   * `logsSubscribe` replies `{ id, result: <subscriptionId> }`, and the reply is
+   * the only place the two are ever associated. Miss it and the id is
+   * unrecoverable for the life of the connection.
+   */
+  private readonly pendingSubscriptions = new Map<number, Address>();
+
+  /**
+   * Subscription id -> wallet. **Rebuilt from empty on every connect.**
+   *
+   * Ids are per-connection and the server reuses small integers, so a stale
+   * entry is not merely useless — it actively misroutes: a notification in
+   * flight when the socket dropped can arrive after resubscribe carrying an id
+   * that now belongs to a different wallet. Clearing on connect is what makes
+   * `unknown-subscription` mean "cannot attribute" rather than "attributed to
+   * whoever happens to hold that number now".
+   */
+  private subscriptions = new Map<number, Address>();
   private readonly queue: Array<{ wallet: Address; entry: SignatureEntry; source: SwapSource }> = [];
   private socket: StreamSocket | undefined;
   private running = false;
@@ -273,11 +313,18 @@ export class WalletStream extends EventEmitter {
         this.onDisconnect(error.message);
       });
 
+      // Both maps belong to the connection, not to the stream. Cleared before
+      // resubscribing so an id from the previous socket can never resolve.
+      this.pendingSubscriptions.clear();
+      this.subscriptions = new Map<number, Address>();
+
       for (const wallet of this.deps.wallets) {
+        const requestId = this.nextRequestId++;
+        this.pendingSubscriptions.set(requestId, wallet);
         socket.send(
           JSON.stringify({
             jsonrpc: '2.0',
-            id: this.nextRequestId++,
+            id: requestId,
             method: 'logsSubscribe',
             params: [{ mentions: [wallet] }, { commitment: 'confirmed' }],
           }),
@@ -348,15 +395,45 @@ export class WalletStream extends EventEmitter {
       return;
     }
 
+    // A subscribe confirmation: `{ id, result: <subscriptionId> }`. This is the
+    // only message that ever associates a wallet with an id, so it is handled
+    // before anything else and never treated as a notification.
+    if (typeof payload?.result === 'number' && typeof payload?.id === 'number') {
+      const wallet = this.pendingSubscriptions.get(payload.id);
+      if (wallet !== undefined) {
+        this.pendingSubscriptions.delete(payload.id);
+        this.subscriptions.set(payload.result, wallet);
+      }
+      return;
+    }
+
     const value = payload?.params?.result?.value;
     if (value?.signature === undefined) return;
     // A log notification carrying an error is a failed transaction; it still
     // goes through the parser so it surfaces as TX_FAILED rather than vanishing.
     const slot = payload.params.result.context?.slot ?? 0;
 
-    for (const wallet of this.deps.wallets) {
-      this.enqueue(wallet, { signature: value.signature, slot, err: value.err ?? null }, 'live');
+    // Routed to exactly one wallet, by the id the server stamped on it.
+    //
+    // This used to be a loop over `this.deps.wallets`, which turned one
+    // notification into thirteen queue entries — twelve of them for wallets that
+    // had nothing to do with the transaction. The bounded queue then shed from
+    // the front, so the last wallet in the list survived to fetch, was not in
+    // the transaction, and was admitted to the seen set anyway, deduping out the
+    // wallet that actually traded. Handoff 21 has the measurement.
+    const subscription = payload?.params?.subscription;
+    const wallet =
+      typeof subscription === 'number' ? this.subscriptions.get(subscription) : undefined;
+
+    if (wallet === undefined) {
+      this.emit('unknown-subscription', {
+        subscription: typeof subscription === 'number' ? subscription : null,
+        signature: value.signature,
+      } satisfies UnknownSubscriptionEvent);
+      return;
     }
+
+    this.enqueue(wallet, { signature: value.signature, slot, err: value.err ?? null }, 'live');
   }
 
   /**

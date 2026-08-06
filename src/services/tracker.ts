@@ -189,6 +189,12 @@ export type TrackerEventName =
    * only measure of how much of the feed was dropped.
    */
   | 'stream-queue-overflow'
+  /**
+   * A notification arrived on a subscription id this process cannot attribute
+   * to a wallet. Expected transiently around a reconnect; a steady stream means
+   * the id map is wrong. Never fanned out — see handoff 22.
+   */
+  | 'stream-unknown-subscription'
   | 'error';
 
 export interface TrackerEventRecord {
@@ -505,6 +511,9 @@ export class Tracker extends EventEmitter {
     });
     deps.stream.on('queue-overflow', (payload: unknown) => {
       this.record('stream-queue-overflow', payload);
+    });
+    deps.stream.on('unknown-subscription', (payload: unknown) => {
+      this.record('stream-unknown-subscription', payload);
     });
   }
 

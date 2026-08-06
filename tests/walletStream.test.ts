@@ -71,13 +71,50 @@ function fakeRpc(options: FakeRpcOptions) {
   return { rpc, calls, fetched };
 }
 
-function fakeSocket() {
+/**
+ * A socket that speaks the `logsSubscribe` protocol, including the part that
+ * matters: **it answers a subscribe with a subscription id, and it stamps that
+ * id on every notification.**
+ *
+ * The previous fake did neither. It never replied to a subscribe, and its
+ * notifications carried no `subscription` field — so a stream that ignored the
+ * id and fanned every notification out to all thirteen wallets looked exactly
+ * like one that routed correctly. Seventeen tests passed over a systematic
+ * misattribution because the fake could not represent the protocol the bug lives
+ * in. See handoff 22.
+ */
+function fakeSocket(firstSubscriptionId = 1_000) {
   const sent: string[] = [];
   let onMessage: (data: string) => void = () => undefined;
   let onClose: () => void = () => undefined;
+  /** wallet -> the id this socket handed out for it, newest subscribe wins. */
+  const subscriptionIds = new Map<string, number>();
+  // Callers testing reconnect pass a distinct range: a real server does not
+  // reissue the same ids to a new connection, and a fake that does makes a
+  // stale id indistinguishable from a fresh one.
+  let nextSubscriptionId = firstSubscriptionId;
 
   const socket: StreamSocket = {
-    send: (payload) => sent.push(payload),
+    send: (payload) => {
+      sent.push(payload);
+      // Answer a subscribe the way a validator does: `{ id, result: <subId> }`.
+      // Synchronous is safe — `connect()` registers `onMessage` before sending.
+      try {
+        const request = JSON.parse(payload) as {
+          id?: number;
+          method?: string;
+          params?: [{ mentions?: string[] }, unknown];
+        };
+        if (request.method !== 'logsSubscribe') return;
+        const wallet = request.params?.[0]?.mentions?.[0];
+        if (wallet === undefined || request.id === undefined) return;
+        const subscription = nextSubscriptionId++;
+        subscriptionIds.set(wallet, subscription);
+        onMessage(JSON.stringify({ jsonrpc: '2.0', result: subscription, id: request.id }));
+      } catch {
+        // A test sending something unparseable is testing something else.
+      }
+    },
     close: () => onClose(),
     onMessage: (h) => {
       onMessage = h;
@@ -91,10 +128,26 @@ function fakeSocket() {
   return {
     socket,
     sent,
-    deliver: (signature: string, slot: number) =>
+    subscriptionIds,
+    /**
+     * Deliver a notification. `wallet` selects whose subscription it arrives on;
+     * omitted, it uses the first id this socket issued — what every
+     * single-wallet test wants.
+     */
+    deliver: (signature: string, slot: number, wallet?: string) => {
+      const subscription =
+        wallet === undefined ? [...subscriptionIds.values()][0] : subscriptionIds.get(wallet);
       onMessage(
         JSON.stringify({
-          params: { result: { context: { slot }, value: { signature, err: null } } },
+          params: { subscription, result: { context: { slot }, value: { signature, err: null } } },
+        }),
+      );
+    },
+    /** A notification on an id this socket never issued. */
+    deliverRaw: (signature: string, slot: number, subscription: number | undefined) =>
+      onMessage(
+        JSON.stringify({
+          params: { subscription, result: { context: { slot }, value: { signature, err: null } } },
         }),
       ),
   };
@@ -627,6 +680,154 @@ describe('null window', () => {
       expect(windows[0]).toMatchObject({ attempts: 3, resolved: true });
     } finally {
       cursors.close();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Subscription routing
+// ---------------------------------------------------------------------------
+
+/**
+ * `onMessage` used to discard the subscription id and enqueue every
+ * notification for EVERY tracked wallet. One notification became thirteen
+ * entries, twelve of them for wallets with nothing to do with the transaction;
+ * the bounded queue then shed from the front, so the last wallet in the list
+ * survived, fetched, was not in the transaction, and was admitted to the seen
+ * set anyway — deduping out the wallet that actually traded. See handoff 21 for
+ * the evidence and handoff 22 for the fix.
+ */
+describe('subscription routing', () => {
+  const WALLET_B = 'popo3Rj6arKNttyUFpWfbkv2gG8uS13TGtmH6JPMuHz';
+
+  function twoWalletHarness(rpc: RpcClient, socketFactory: () => StreamSocket) {
+    const cursors = openCursorStore({ path: ':memory:' });
+    const stream = new WalletStream({
+      wallets: [WALLET, WALLET_B],
+      rpc,
+      cursors,
+      connect: async () => socketFactory(),
+      now: () => 1_700_000_000_000,
+      sleep: async () => undefined,
+      random: () => 0,
+    });
+    const attributed: string[] = [];
+    const unknown: Array<{ subscription: number | null; signature: string }> = [];
+    // `unparsed` and `swap` both carry the wallet the fetch was attributed to,
+    // but only the fetch itself proves routing, so record at the RPC boundary.
+    stream.on('unknown-subscription', (e) => unknown.push(e));
+    return { stream, cursors, attributed, unknown };
+  }
+
+  it('routes a notification to the ONE wallet whose subscription carried it', async () => {
+    const history = entries(1);
+    const fetchedFor: string[] = [];
+    const rpc: RpcClient = {
+      getSignaturesForAddress: async () => [],
+      getTransaction: async (signature) => {
+        const entry = history.find((e) => e.signature === signature);
+        return entry === undefined ? null : txFor(signature, entry.slot);
+      },
+    };
+    const sock = fakeSocket();
+    const cursors = openCursorStore({ path: ':memory:' });
+    const stream = new WalletStream({
+      wallets: [WALLET, WALLET_B],
+      rpc,
+      cursors,
+      connect: async () => sock.socket,
+      now: () => 1_700_000_000_000,
+      sleep: async () => undefined,
+      random: () => 0,
+    });
+    // The cursor advances once per successful dispatch, and it is per wallet —
+    // so it is the cleanest observable proof of who a fetch was attributed to.
+    try {
+      await stream.start();
+      sock.deliver('sig-1', 101, WALLET_B);
+      await new Promise((r) => setImmediate(r));
+
+      expect(cursors.get(WALLET_B)?.lastSignature).toBe('sig-1');
+      // The other wallet must not have been touched at all.
+      expect(cursors.get(WALLET)?.lastSignature).toBeUndefined();
+      void fetchedFor;
+    } finally {
+      cursors.close();
+    }
+  });
+
+  it('remaps ids on reconnect, so a stale id is not routed to the wrong wallet', async () => {
+    const history = entries(2);
+    const rpc: RpcClient = {
+      getSignaturesForAddress: async () => [],
+      getTransaction: async (signature) => {
+        const entry = history.find((e) => e.signature === signature);
+        return entry === undefined ? null : txFor(signature, entry.slot);
+      },
+    };
+    // Two sockets: the second hands out different ids for the same wallets.
+    const first = fakeSocket(1_000);
+    const second = fakeSocket(2_000);
+    let handedOut = 0;
+    const cursors = openCursorStore({ path: ':memory:' });
+    const stream = new WalletStream({
+      wallets: [WALLET, WALLET_B],
+      rpc,
+      cursors,
+      connect: async () => (handedOut++ === 0 ? first.socket : second.socket),
+      now: () => 1_700_000_000_000,
+      sleep: async () => undefined,
+      random: () => 0,
+    });
+    const unknown: unknown[] = [];
+    stream.on('unknown-subscription', (e) => unknown.push(e));
+    try {
+      await stream.start();
+      const staleId = first.subscriptionIds.get(WALLET_B)!;
+
+      // Reconnect. The second socket issues fresh ids for both wallets.
+      first.socket.close();
+      await new Promise((r) => setImmediate(r));
+      await new Promise((r) => setImmediate(r));
+
+      // A notification arriving on the OLD id must not be routed at all.
+      second.deliverRaw('sig-1', 101, staleId);
+      await new Promise((r) => setImmediate(r));
+      expect(cursors.get(WALLET)?.lastSignature).toBeUndefined();
+      expect(cursors.get(WALLET_B)?.lastSignature).toBeUndefined();
+      expect(unknown).toHaveLength(1);
+
+      // The new id routes correctly.
+      second.deliver('sig-2', 102, WALLET_B);
+      await new Promise((r) => setImmediate(r));
+      expect(cursors.get(WALLET_B)?.lastSignature).toBe('sig-2');
+    } finally {
+      cursors.close();
+    }
+  });
+
+  it('emits an unknown subscription id rather than fanning it out', async () => {
+    const fetched: string[] = [];
+    const rpc: RpcClient = {
+      getSignaturesForAddress: async () => [],
+      getTransaction: async (signature) => {
+        fetched.push(signature);
+        return txFor(signature, 101);
+      },
+    };
+    const sock = fakeSocket();
+    const h = twoWalletHarness(rpc, () => sock.socket);
+    try {
+      await h.stream.start();
+      sock.deliverRaw('sig-1', 101, 999_999);
+      await new Promise((r) => setImmediate(r));
+
+      expect(h.unknown).toHaveLength(1);
+      expect(h.unknown[0]).toMatchObject({ subscription: 999_999, signature: 'sig-1' });
+      // Not fanned out: nothing was fetched for anybody.
+      expect(fetched).toHaveLength(0);
+    } finally {
+      h.cursors.close();
     }
   });
 });
