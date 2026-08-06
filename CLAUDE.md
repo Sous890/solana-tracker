@@ -14,7 +14,7 @@ simulate every fill while claiming not to. Do not create or load a keypair path.
 - `README.md` — layering, the control API, and the recorded decisions behind
   the integer money model, the orphan gate, and disk-not-chain reconciliation.
   It is current and detailed; do not re-derive it, and do not duplicate it here.
-- `docs/handoffs/` — one file per session, numbered. **`19-replay-resolution.md`
+- `docs/handoffs/` — one file per session, numbered. **`20-corpus-coverage.md`
   is the most recent.** Read the latest two before starting. They record what
   was verified from code and the database versus what was recalled, which is the
   distinction that matters most in this repo.
@@ -198,24 +198,47 @@ ledger. Fixing it needs an additive nullable `signal_age_ms` column on
 backfill and do not infer an age from timestamps — a wrong number is worse than
 a missing one.
 
-### 9. Most observed transactions do not parse
+### 9. ~1,000 real swaps were dropped before the parser ever saw them
 
-Measured on the 2026-08-05 session: **4,495 `tracker:swap-unparsed` against
-1,857 parsed swaps — a 71% unparsed share**, where the soak digest's own
-threshold for raising a finding is 1%. Every win rate, payoff ratio and fill
-rate in this repo is computed on the 29% that parsed, and **nothing establishes
-that the two groups resemble each other.** If the parser fails
-disproportionately on one venue, one pool shape, or one size band, every
-calibration number inherits that skew with no visible symptom.
+Measured on the 2026-08-05 session (handoff 20). The raw unparsed share is
+**70.8%** — 4,501 declined against 1,857 parsed — but that is the wrong number.
+Half of it is `TX_FAILED` and `NO_MINT_DELTA`, transactions that moved no tokens
+and were correctly declined.
 
-Unlike gaps 1-3 this one has no established direction, which is worse rather
-than better: it cannot be argued away as conservative. The tags are already in
-every session file, so the first cut is cheap.
+The number that matters is the **swap-like unparsed rate: 34.2%**
+(95% CI 29.4-38.3%), from ~965 lost swaps against 1,857 recorded.
 
-Same session, unexplained: **105 `stream-disconnected` against 19
-`stream-reconnected`** in under five hours. Either the stream is far less stable
-than assumed or the two events are not recorded symmetrically. Both readings
-matter for what a soak's coverage is worth.
+**It is not a parser gap, and there is no missing venue.** `swapParser.ts` works
+from balance deltas and does not gate on program id — 1,453 of 1,857 parsed
+swaps carry `venue: 'unknown'`, and PumpSwap, Raydium CPMM and Jupiter all parse
+today. The venue label is analytic, not gating.
+
+The cause is a read-after-write race made permanent: `walletStream.handle()`
+calls `seen.admit(signature)` **before** fetching, `getTransaction` returning
+`null` is dropped with no retry, and `SeenSignatures` then prevents the gap fill
+from ever re-delivering that signature. A transaction fetched a moment too early
+leaves the corpus forever. This is gap 6's null window, unfixed, plus a dedupe
+that converts a transient miss into a permanent one.
+
+Re-measure with `npx tsx scripts/classify-unparsed.ts <session.jsonl>` — it hits
+RPC deliberately, because a session records only `{reason, signature}` and drops
+`parseSwap`'s `detail`.
+
+**This does not touch handoff 17.** The wallet decision was computed from
+`calibrate-delays.ts` and `export-wallet-history.ts`, which page signatures
+themselves and call `parseSwap` directly, never through `walletStream`. Nothing
+outside `tests/` imports the replay harness either.
+
+Two smaller coverage holes, same session: gap fill truncates at
+`MAX_COLD_FILL = 100` per wallet on a cold start (11 of 13 wallets hit it), and
+`enqueue` drops entries past `MAX_IN_FLIGHT = 20` while reporting it as an
+`error` event — which `EXCLUDED_TRACKER_EVENTS` excludes from recording, so the
+size of that hole is unknowable from a session file.
+
+Not a gap, but corrected here: the 105/19 disconnect asymmetry was a counting
+defect. `stream-disconnected` labels three different events — 86 failed
+reconnect *attempts*, plus 10 error/close pairs from ~10 real drops. Coverage
+was fine; 260 gap fills recovered 13,739 signatures.
 
 ## Environment traps
 
