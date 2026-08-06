@@ -41,6 +41,11 @@ sessions/
 *.db-wal
 *.db-shm
 
+# diagnostics and throwaway scripts. `data/` is the application's database
+# directory and is NOT scratch space — session 22 confused the two and deleted
+# the ledger with it. Anything disposable goes here, or outside the repo.
+scratch/
+
 # logs
 logs/
 *.log

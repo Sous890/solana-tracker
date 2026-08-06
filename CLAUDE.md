@@ -14,7 +14,7 @@ simulate every fill while claiming not to. Do not create or load a keypair path.
 - `README.md` — layering, the control API, and the recorded decisions behind
   the integer money model, the orphan gate, and disk-not-chain reconciliation.
   It is current and detailed; do not re-derive it, and do not duplicate it here.
-- `docs/handoffs/` — one file per session, numbered. **`22-subscription-routing.md`
+- `docs/handoffs/` — one file per session, numbered. **`23-ledger-durability.md`
   is the most recent.** Read the latest two before starting. They record what
   was verified from code and the database versus what was recalled, which is the
   distinction that matters most in this repo.
@@ -26,7 +26,7 @@ Node 24 is keg-only Homebrew here, so it may need to be on `PATH`:
 
 | Command | What it does |
 | --- | --- |
-| `npm test` | Full vitest suite — currently **861 tests across 21 files** |
+| `npm test` | Full vitest suite — currently **880 tests across 22 files** |
 | `npx vitest run tests/soak.test.ts` | One test file |
 | `npx vitest run tests/soak.test.ts -t "SIGKILL"` | One test by name substring |
 | `npm run typecheck` | `tsc -p tsconfig.test.json` — types `src` **and** `tests` |
@@ -236,18 +236,92 @@ RPC null window (wrong — a `null` produced no record at all, so it cannot have
 generated the records the rate was computed from). Each was disproved by
 measurement, not argument.
 
-**Still open:** the seen set is keyed on **signature alone**, so one transaction
-genuinely involving two tracked wallets still loses the second. Session 20 found
-zero such cases in 30 sampled, so it is rare rather than absent. The fix is to key
-on `(wallet, signature)` and stop admitting `WALLET_NOT_IN_TX` — one change, not
-two — after checking the `SEEN_CAPACITY` interaction (5,000 entries over 13
-wallets is ~385 signatures per wallet).
+**CLOSED in session 23.** The seen set and `inFlight` are both keyed on
+`(wallet, signature)` via `seenKey()`, and `WALLET_NOT_IN_TX` is no longer
+admitted. One transaction naming two tracked wallets now yields two
+`TrackedSwap`s. The capacity worry that deferred this was **arithmetic left over
+from the fan-out**: a notification routes to exactly one wallet, so one delivery
+costs one slot however the set is keyed. Measured over 2,788 `fetch-window`
+records across both post-fix sessions, distinct pairs ÷ distinct signatures =
+**1.0000**; the busiest whole run consumed 1,800 of 5,000 slots. `SEEN_CAPACITY`
+stays at 5,000 and stays **one global LRU** — a fixed 385/wallet would be worse
+than the status quo, since the busiest wallet alone took 581 slots in 13 minutes.
 
-**Queue shedding is NOT dormant.** 37 sheds in 58 minutes after the fix, against
-30 before it, even though notification volume fell ~13×. Every shed entry is now
-a correctly-routed notification rather than fan-out noise, so each one costs
-something real. Front-shedding drops the oldest pending entry, which is the one
-closest to being fetched. See handoff 22 §Task D for a proposed policy.
+Not admitting `WALLET_NOT_IN_TX` matters for a reason handoff 22 did not name:
+**two of `parseSwap`'s three routes to that code are degraded RPC responses**
+(`meta === null`, and an account key list that does not match `preBalances`), not
+a genuine absence. Admitting those is the same permanent-loss shape session 21
+removed from the null window. Note the limit — `dispatch` still advances the
+cursor, so the signature stays re-deliverable over the **socket**, not through
+gap fill.
+
+### 10. Queue shedding is a single-wallet arrival burst, not backpressure
+
+Diagnosed in session 23, and the shed *policy* is not the first problem.
+
+- **Sheds do not cluster in the startup gap fill.** 0 of 37 in session 22 fell in
+  the gapfill burst — 0 in the first 12 minutes, while the burst runs minutes 0-4.
+- **They arrive in synchronized bursts belonging to ONE wallet.** 26 of the 37
+  landed inside 40 ms, all for `BCagckXe…`; the other 11 were all `H8sMJSCQ…`.
+- **The drain is healthy throughout.** `fetch-window` in the 60 s before every
+  burst: p50 128 ms, max 295 ms, **0 retries, 0 unresolved**. Nothing is stalling.
+
+So the mechanism is a spam-ish wallet emitting tens of notifications in one slot
+against a **global** `MAX_IN_FLIGHT = 20` drained serially at ~130 ms each.
+
+**The telemetry misattributes the shed.** `enqueue` emits `queue-overflow` with
+the wallet being *enqueued*, while `splice(0, n)` removes the **oldest** entries,
+which may belong to any wallet. Every shed count broken down by wallet — including
+the two above — names the arriving wallet, not the losing one. Fix this before
+trusting a per-wallet shed number.
+
+**Capacity, not policy, is the live arithmetic.** 20 entries × ~130 ms ≈ 2.6 s to
+drain, against a `maxSignalAgeMs` of 15,000 ms. The queue could hold roughly 115
+and still deliver inside the freshness gate; 20 is about 5× tighter than the
+latency budget requires. Changing it is a measured re-derivation, not a loosened
+limit — but it was not changed in session 23, and it needs its own tests.
+
+**On shed direction**, if it is changed at all: shed from the **back**. Not
+because the newest entry is worth less — it is worth more — but because of
+`gapFill`'s `until:` anchor. Dropping the front leaves only newer entries to
+dispatch, the cursor advances past the dropped one, and `until: <newer>` can
+never walk back to it: **permanently lost**. Dropping the back leaves the cursor
+behind the dropped entry, so the next gap fill re-offers it. The alpha-decay
+argument for dropping the oldest is correct about the *value of the entry* and
+silent about *whether it comes back*, and across a 2.6 s queue the decay
+difference is small while the recoverability difference is total. Note the
+recovered entry arrives minutes later and will be `STALE_SIGNAL`-rejected, so
+this is a **corpus-completeness** argument, not a trading one.
+
+### 11. The stream's liveness check is never called
+
+`WalletStream.heartbeat()` is invoked from **nowhere** — not `tracker.ts`, not
+`serve.ts`, not `soak.ts`, not any test. `SILENCE_TIMEOUT_MS = 90_000` and the
+`missedHeartbeats >= 2` teardown are dead code.
+
+Consequence, measured in session 23's soak: the socket stopped delivering at
++48.9 min and nothing noticed for **21.6 minutes**, until the underlying TCP
+errored on its own. Then 23 `disconnected` events with **0 `reconnected`** — 21
+consecutive `errored before opening` — and the run spent its last 65 minutes
+receiving nothing while looking healthy. The soak reached 51 live-parsed swaps
+instead of 80 for this reason alone; over the ~49 minutes the socket was up the
+rate was ~63/hour, which is normal.
+
+A silent socket is the failure mode this bot can least afford, because every
+other counter keeps looking fine.
+
+### 12. Six buy intents hung, and the entry gate is currently SHUT
+
+Session 23's soak left 6 `buy` intents `pending` — created 15:51–16:10 UTC, an
+hour before a clean shutdown, so this is not a shutdown race. `reconcileOnStartup`
+marked them `CRASH_ORPHAN`, and guard gate 0 refuses **every buy** while
+unacknowledged orphans exist.
+
+**Clear them before the next soak** (`npm run orphans`) or it will observe
+traffic and open nothing. The broker resolves its own failures and the guard
+layer resolves rejections, so an hour-old `pending` means something never
+settled — most likely a quote or screener call with no timeout during the
+`UPSTREAM_ERROR` window. Not diagnosed.
 
 ## Environment traps
 
@@ -257,6 +331,42 @@ closest to being fetched. See handoff 22 §Task D for a proposed policy.
   diagnostic script — and session 22 did exactly that and then deleted the
   ledger, the cursors and the runtime state with `rm -rf data`. Put scratch files
   outside the repo. Never `rm -rf` a path under `data/`.
+
+- **The ledger now has a backstop, and it is not a substitute for the rule
+  above.** `services/ledgerDurability.ts` snapshots the ledger on start, every 15
+  minutes, on bot-idle and on shutdown, to `~/.solana-tracker/snapshots`
+  (`LEDGER_SNAPSHOT_DIR`), keeping the newest 24. It uses **`VACUUM INTO`, never
+  a file copy**: the ledger runs WAL with `synchronous = FULL`, so `cp
+  tracker.db` alone can yield a file that opens perfectly and has no `fills`
+  table at all — measured, not theorised, in `tests/ledgerDurability.test.ts`.
+
+- **Startup refuses an empty ledger beside a non-empty `sessions/`.** That
+  pairing means the database was removed rather than never created.
+  `ALLOW_EMPTY_LEDGER=1` is the documented override for a genuine first run. The
+  check lives at the composition root and runs **before `openLedger`**, which
+  creates the file it is given — inside `reconcileOnStartup` it would be
+  reporting on a database it had just made, and `db/ledger.ts` is off-limits
+  anyway.
+
+- **What a session file cannot give back.** Session 23 established this against
+  the real corpus: `price-tick` payloads carry mint, exact holdings and decimals,
+  and a buy fill is reproducible from its recorded entry quote via
+  `floor(outAmount × (10000 − paperLatencyPenaltyBps) / 10000)` — verified
+  matching on 20 of 20 held mints. **Intents are not recoverable at all.** Guard
+  gate 3 runs before the broker's first quote, so a `STALE_SIGNAL` rejection
+  produces no quote, no screen and no tick — only the originating swap, which is
+  indistinguishable from one the strategy declined to act on. Do not attempt to
+  reconstruct intents from a session; a ledger with invented rows is worse than a
+  missing one.
+
+- **Paper `slippage_bps` carries no information.** `received =
+  reduceByBpsFloor(quoted, paperLatencyPenaltyBps)` and `slippageBps =
+  shortfallBps(quoted, received)`, so every paper fill records the config
+  constant back to you — computed over every priced entry quote in the last
+  session, the only value that occurs is **30**. Paper fills therefore **cannot**
+  recalibrate the 30 bps penalty against live quotes; that needs live fills,
+  which paper mode has never produced. The replay harness reads **sessions**, not
+  fills, so it is unaffected by a lost ledger.
 
 Each of these has already cost a session.
 

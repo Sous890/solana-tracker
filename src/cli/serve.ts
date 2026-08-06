@@ -16,6 +16,7 @@ import 'dotenv/config';
 import { loadConfig } from '../core/config.js';
 import { ConfigError } from '../core/config.js';
 import { createTrackerRuntime, RuntimeConfigError } from '../services/tracker.js';
+import { LedgerLostError } from '../services/ledgerDurability.js';
 import { startApi } from '../services/api.js';
 import { openWalletStore } from '../services/walletStore.js';
 import { openAnalysisParams } from '../services/analysisParams.js';
@@ -66,6 +67,12 @@ async function main(): Promise<void> {
         : { jupiterApiKey: process.env['JUPITER_API_KEY'] }),
     });
   } catch (cause) {
+    // `LedgerLostError`'s message names the snapshot directory and the override,
+    // so it is printed on its own rather than stringified into one line.
+    if (cause instanceof LedgerLostError) {
+      console.error(`\n${cause.message}\n`);
+      process.exit(2);
+    }
     console.error(cause instanceof RuntimeConfigError ? cause.message : String(cause));
     process.exit(2);
   }

@@ -90,6 +90,7 @@ import { createDecimalsResolver } from '../adapters/mintMetadata.js';
 import { WalletStream } from '../adapters/walletStream.js';
 import { StrategyRunner } from './strategyRunner.js';
 import { SessionRecorder } from './recorder.js';
+import { LedgerSnapshotter, assertLedgerPresent } from './ledgerDurability.js';
 
 /** `true`/`1`/`yes` are true; anything else present is false. */
 function envBool(name: string, fallback: boolean): boolean {
@@ -1250,6 +1251,8 @@ export interface TrackerRuntime {
   ledger: Ledger;
   fills: FillsView;
   config: Config;
+  /** Ledger snapshots, off this volume. See `services/ledgerDurability.ts`. */
+  snapshots: LedgerSnapshotter;
   /** Closes every handle. Stops the tracker first; sells nothing. */
   close(): Promise<void>;
 }
@@ -1290,6 +1293,17 @@ export interface TrackerRuntimeOptions {
   sessionDir?: string;
   sessionMaxBytes?: number;
   sessionRetentionDays?: number;
+  /**
+   * Start with an empty ledger even though `sessionDir` is non-empty.
+   *
+   * The genuine first-run escape hatch. Falls back to `ALLOW_EMPTY_LEDGER`.
+   * See `services/ledgerDurability.ts` for why the refusal exists at all.
+   */
+  allowEmptyLedger?: boolean;
+  /** Where snapshots go. Falls back to `LEDGER_SNAPSHOT_DIR`, then off-volume. */
+  snapshotDir?: string;
+  snapshotIntervalMs?: number;
+  snapshotKeep?: number;
 }
 
 /** Thrown when the runtime cannot be built as configured. */
@@ -1338,6 +1352,17 @@ export function createTrackerRuntime(options: TrackerRuntimeOptions): TrackerRun
       envInt('SESSION_RETENTION_DAYS', RECORDING_DEFAULTS.sessionRetentionDays),
     secrets,
   };
+
+  // BEFORE `openLedger`, which creates the file it is given: after that call the
+  // evidence of absence is gone. An empty ledger beside recorded sessions means
+  // the database was removed, not that this is a first run — session 22 started
+  // clean on a destroyed ledger and the only symptom was thirteen truncated cold
+  // fills. `ALLOW_EMPTY_LEDGER=1` is the documented override.
+  assertLedgerPresent({
+    dbPath: options.dbPath,
+    sessionsDir: recording.directory,
+    ...(options.allowEmptyLedger === undefined ? {} : { allowEmpty: options.allowEmptyLedger }),
+  });
 
   const ledger = openLedger({
     path: options.dbPath,
@@ -1474,13 +1499,39 @@ export function createTrackerRuntime(options: TrackerRuntimeOptions): TrackerRun
 
   const fills = openFillsView({ path: options.dbPath });
 
+  // Start / interval / stop. Subscribed to `state-change` rather than wired into
+  // `Tracker.stop()`, because the status-flip ordering in `start()`/`stop()` is
+  // load-bearing for guard gate 2 and is not to be disturbed — a listener cannot
+  // disturb it. `snapshot()` never throws, so a failing backup cannot stop the
+  // bot from starting or from shutting down.
+  const snapshots = new LedgerSnapshotter({
+    dbPath: options.dbPath,
+    ...(options.snapshotDir === undefined ? {} : { directory: options.snapshotDir }),
+    ...(options.snapshotIntervalMs === undefined
+      ? {}
+      : { intervalMs: options.snapshotIntervalMs }),
+    ...(options.snapshotKeep === undefined ? {} : { keep: options.snapshotKeep }),
+    logger: { info: logger.info.bind(logger), warn: logger.warn.bind(logger) },
+  });
+  snapshots.start();
+  tracker.on('event', (record: { type: string; data: unknown }) => {
+    if (record.type !== 'state-change') return;
+    // The books are only interesting at rest. A snapshot as the bot goes idle is
+    // the one that has to contain the open positions a restart must find.
+    const status = (record.data as { status?: string } | undefined)?.status;
+    if (status === 'idle') snapshots.snapshot('bot-idle');
+  });
+
   return {
     tracker,
     ledger,
     fills,
     config,
+    snapshots,
     async close() {
       await tracker.shutdown();
+      // Before the handles close, so the last snapshot has the final state in it.
+      snapshots.stop('shutdown');
       fills.close();
       runtime.close();
       cursors.close();

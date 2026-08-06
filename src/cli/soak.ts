@@ -23,6 +23,7 @@ import pino from 'pino';
 import { loadConfig } from '../core/config.js';
 import { createTrackerRuntime } from '../services/tracker.js';
 import type { TrackerEventRecord, TrackerLogger } from '../services/tracker.js';
+import { LedgerLostError } from '../services/ledgerDurability.js';
 import { SoakDigest, formatDigest } from '../services/soak.js';
 import { solToLamports } from '../core/units.js';
 
@@ -84,23 +85,56 @@ async function main(): Promise<void> {
     );
   }
 
-  const runtime = createTrackerRuntime({
-    config,
-    dbPath: args.dbPath,
-    rpcHttpUrl: required('RPC_HTTP_URL'),
-    rpcWssUrl: required('RPC_WSS_URL'),
-    ...(process.env['JUPITER_API_KEY'] === undefined
-      ? {}
-      : { jupiterApiKey: process.env['JUPITER_API_KEY'] }),
-    logger,
-    recordSessions: true,
-  });
+  let runtime: ReturnType<typeof createTrackerRuntime>;
+  try {
+    runtime = createTrackerRuntime({
+      config,
+      dbPath: args.dbPath,
+      rpcHttpUrl: required('RPC_HTTP_URL'),
+      rpcWssUrl: required('RPC_WSS_URL'),
+      ...(process.env['JUPITER_API_KEY'] === undefined
+        ? {}
+        : { jupiterApiKey: process.env['JUPITER_API_KEY'] }),
+      logger,
+      recordSessions: true,
+    });
+  } catch (cause) {
+    // The message IS the remedy — it names the snapshot directory and the
+    // override. A stack trace above it buries the one part anybody needs.
+    if (cause instanceof LedgerLostError) {
+      console.error(`\n${cause.message}\n`);
+      process.exit(2);
+    }
+    throw cause;
+  }
 
   const startedAt = Date.now();
+
+  /**
+   * Last net flow read while the ledger connection was open.
+   *
+   * `finish()` closes the runtime BEFORE the final digest, deliberately, so the
+   * recorder's counters are final and the session on disk is complete. But the
+   * digest also reads one number out of the ledger, and reading a closed
+   * `better-sqlite3` handle throws — so every soak this repo has ever run died
+   * with `TypeError: The database connection is not open` at the moment it was
+   * supposed to print its findings, and `sessions/digests/` has never contained
+   * a `final-*` file. The hourly digests worked, which is what hid it.
+   *
+   * Latched rather than reordered: moving the close after the digest would undo
+   * the guarantee the close ordering exists for.
+   */
+  let lastNetFlowLamports = 0n;
+  let ledgerOpen = true;
+
   const digest = new SoakDigest({
     startedAt,
     startingLamports: solToLamports(config.paperStartingSol),
-    ledgerNetFlowLamports: () => runtime.ledger.getNetLamportsFlow({ simulated: true }),
+    ledgerNetFlowLamports: () => {
+      if (!ledgerOpen) return lastNetFlowLamports;
+      lastNetFlowLamports = runtime.ledger.getNetLamportsFlow({ simulated: true });
+      return lastNetFlowLamports;
+    },
     recorderStats: () => {
       const session = runtime.tracker.session;
       return {
@@ -142,7 +176,10 @@ async function main(): Promise<void> {
     clearTimeout(deadline);
     logger.info({ reason }, `soak ending: ${reason}`);
     // Closed BEFORE the final digest, so the recorder's counters are final and
-    // the session on disk is complete.
+    // the session on disk is complete. The one ledger-derived number the digest
+    // needs is latched first — see `lastNetFlowLamports`.
+    lastNetFlowLamports = runtime.ledger.getNetLamportsFlow({ simulated: true });
+    ledgerOpen = false;
     await runtime.close();
     const findings = emit(`final-${reason}`);
     process.exit(findings === 0 ? 0 : 1);

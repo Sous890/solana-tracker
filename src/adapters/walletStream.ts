@@ -73,8 +73,51 @@ export const BACKOFF_MIN_MS = 1_000;
 export const BACKOFF_MAX_MS = 30_000;
 /** Bound on history replayed when the cursor is unusable. */
 export const MAX_COLD_FILL = 100;
+/**
+ * Entries retained by the seen set, which is keyed on `(wallet, signature)`.
+ *
+ * ── RE-DERIVED IN SESSION 23, AND THE OLD ARITHMETIC WAS WRONG ────────────
+ *
+ * Handoff 22 reasoned that a per-wallet key shrinks the effective dedupe window
+ * by up to 13× — 5,000 slots over 13 wallets, "roughly 385 signatures per
+ * wallet" — and left the change undone until that was settled. That figure is a
+ * fan-out artifact, not a property of per-wallet keying.
+ *
+ * A notification is routed to **exactly one** wallet (handoff 22), so one
+ * delivery consumes one slot whichever way the set is keyed. A signature only
+ * consumes k slots when the transaction genuinely names k tracked wallets and
+ * each is delivered separately. Measured over both post-routing-fix sessions —
+ * 2,788 `fetch-window` records, which carry `(wallet, signature)` — the ratio of
+ * distinct pairs to distinct signatures is **1.0000**, and the busiest single
+ * run consumed **1,800** slots end to end against a cap of 5,000.
+ *
+ * That measurement is not independent evidence and must not be quoted as if it
+ * were: the signature-only key suppressed a second wallet's delivery inside
+ * `handle` *before* `fetch-window` was emitted, so a collision could not have
+ * been recorded even if it happened. It bounds the multiplier at 1.0 for
+ * traffic the old key admitted, which is why the count is worth taking with the
+ * re-keyed build rather than assumed settled.
+ *
+ * Unchanged at 5,000, and kept as ONE GLOBAL LRU rather than a per-wallet bound.
+ * A fixed 5,000/13 = 385 per wallet would be strictly worse than the status quo:
+ * the busiest wallet alone consumed 581 slots in a 13-minute run and would
+ * evict its own entries mid-run while quiet wallets sat near zero. A global LRU
+ * spends capacity where the traffic actually is, and its failure mode under
+ * eviction is a duplicate emit — caught downstream by guard gate 6 — rather than
+ * a lost swap.
+ */
 export const SEEN_CAPACITY = 5_000;
 export const MAX_IN_FLIGHT = 20;
+
+/**
+ * The seen set's key. One transaction can legitimately belong to two tracked
+ * wallets, so the signature alone does not identify an observation.
+ *
+ * `|` is safe as a separator: both halves are base58, which has no `|`.
+ */
+export function seenKey(wallet: Address, signature: string): string {
+  return `${wallet}|${signature}`;
+}
 
 /**
  * Attempts at `getTransaction` before a signature is given up on for now.
@@ -107,6 +150,11 @@ export const FETCH_RETRY_BASE_MS = 150;
  * A signature arrives from both the socket and the gap fill routinely; the
  * consumer must see it once. `Map` iterates in insertion order, so the oldest
  * key is the first one.
+ *
+ * Deliberately still a set of opaque strings rather than of `(wallet,
+ * signature)` pairs. What a key *means* is the stream's policy, not this
+ * structure's — see `seenKey`. Keeping the bound generic is also what let the
+ * key change without touching either of this class's own tests.
  */
 export class SeenSignatures {
   private readonly entries = new Map<string, true>();
@@ -486,9 +534,13 @@ export class WalletStream extends EventEmitter {
     entry: SignatureEntry,
     source: SwapSource,
   ): Promise<void> {
-    if (this.seen.has(entry.signature)) return;
-    if (this.inFlight.has(entry.signature)) return;
-    this.inFlight.add(entry.signature);
+    // Both sets are keyed on the PAIR. One transaction can genuinely belong to
+    // two tracked wallets — the trader and the counterparty — and a
+    // signature-only key deduped the second away before it was ever fetched.
+    const key = seenKey(wallet, entry.signature);
+    if (this.seen.has(key)) return;
+    if (this.inFlight.has(key)) return;
+    this.inFlight.add(key);
 
     try {
       const startedAt = this.deps.now();
@@ -528,20 +580,53 @@ export class WalletStream extends EventEmitter {
       // from the next gap fill instead of leaving the corpus for good.
       if (tx === null) return;
 
-      this.seen.admit(entry.signature);
-      await this.dispatch(wallet, entry, tx, source);
+      // Admission now depends on what the transaction turned out to be, so it
+      // happens AFTER the parse rather than before it. `inFlight` still covers
+      // the whole window, so the two delivery paths cannot both process this.
+      const result = await this.dispatch(wallet, entry, tx, source);
+
+      // `WALLET_NOT_IN_TX` is deliberately NOT admitted.
+      //
+      // Two of the three ways `parseSwap` reaches this code are degraded RPC
+      // responses — `meta === null`, and an account key list that does not match
+      // `preBalances` — rather than a genuine absence. Admitting those is the
+      // same permanent-loss shape session 21 removed from the null window: the
+      // transaction is consumed on the strength of an answer that was never
+      // complete. The third case, a real mentions-only match, costs at worst one
+      // re-fetch on a re-delivery, and post-routing-fix it was measured at zero
+      // occurrences across 833 unparsed records.
+      //
+      // Under the old signature-only key this was not a safe change — not
+      // admitting meant every mentions-only transaction was re-fetched for every
+      // other wallet, breaking the socket-versus-gap-fill dedupe the set exists
+      // for. That is why handoff 22 called B4 and B5 one change: the key is what
+      // makes not-admitting cheap.
+      //
+      // NOTE the limit: `dispatch` still advances the cursor, so a re-offer will
+      // not come back through gap fill. Not admitting keeps the signature
+      // re-deliverable over the SOCKET, not through replay. Making the degraded
+      // cases genuinely recoverable means holding the cursor back too, which is
+      // a separate change with its own monotonicity risk.
+      const mentionsOnly = result.kind === 'unparsed' && result.reason === 'WALLET_NOT_IN_TX';
+      if (!mentionsOnly) this.seen.admit(key);
     } finally {
-      this.inFlight.delete(entry.signature);
+      this.inFlight.delete(key);
     }
   }
 
-  /** Parse one fetched transaction, emit it, and advance the cursor. */
+  /**
+   * Parse one fetched transaction, emit it, and advance the cursor.
+   *
+   * Returns the parse result so `handle` can decide admission from it. The
+   * decision belongs to the caller because it is about the seen set's
+   * bookkeeping, not about delivery.
+   */
   private async dispatch(
     wallet: Address,
     entry: SignatureEntry,
     tx: ParsedTransactionWithMeta,
     source: SwapSource,
-  ): Promise<void> {
+  ): Promise<ParseResult> {
 
     // Stamped here, after the fetch, so `observedAt` is when this process
     // actually had the transaction in hand — not when the signature was queued.
@@ -564,6 +649,7 @@ export class WalletStream extends EventEmitter {
     // Only now. The cursor means "delivered", so a crash before this point
     // re-delivers rather than skipping.
     this.deps.cursors.set(wallet, entry.signature, tx.slot, this.deps.now());
+    return result;
   }
 
   // -- gap fill -------------------------------------------------------------

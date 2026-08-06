@@ -831,3 +831,193 @@ describe('subscription routing', () => {
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// Seen set keyed on (wallet, signature)
+// ---------------------------------------------------------------------------
+
+/**
+ * Handoff 22 fixed WHO a notification is routed to. It did not fix what the
+ * seen set is keyed on, and those are different bugs with the same symptom.
+ *
+ * With a signature-only key, one transaction genuinely involving two tracked
+ * wallets still loses the second: the first admits the signature and the second
+ * is deduped away before it is ever fetched. Handoff 22 argued that re-keying on
+ * `(wallet, signature)` and no longer admitting `WALLET_NOT_IN_TX` are one
+ * change rather than two, because admitting a mentions-only match is only
+ * defensible while the key is signature-only. Both move together here.
+ *
+ * The collision case is exercised with a REAL capture, not a synthetic one.
+ * `raydium-v4-buy.json` has two genuine balance participants — the trader, who
+ * buys, and the pool vault, which sells the same token amount back. Nothing
+ * about the fixture was fabricated to make this describe block work.
+ */
+describe('seen set keyed on (wallet, signature)', () => {
+  /** The pool vault in the capture: a real second balance participant. */
+  const POOL = '4DjZjwnQZz4kMm9djNeZzfAzom2Acnefxd6BtJpKT3kz';
+  /** Named in neither leg of the capture, so it parses `WALLET_NOT_IN_TX`. */
+  const ABSENT = 'popo3Rj6arKNttyUFpWfbkv2gG8uS13TGtmH6JPMuHz';
+
+  const tick = async (times = 3): Promise<void> => {
+    for (let i = 0; i < times; i += 1) await new Promise((r) => setImmediate(r));
+  };
+
+  function pairHarness(
+    wallets: string[],
+    rpc: RpcClient,
+    socketFactory: () => StreamSocket,
+  ) {
+    const cursors = openCursorStore({ path: ':memory:' });
+    const stream = new WalletStream({
+      wallets,
+      rpc,
+      cursors,
+      connect: async () => socketFactory(),
+      now: () => 1_700_000_000_000,
+      sleep: async () => undefined,
+      random: () => 0,
+    });
+    const swaps: TrackedSwap[] = [];
+    const unparsed: Array<{ reason: string; signature: string }> = [];
+    stream.on('swap', (swap: TrackedSwap) => swaps.push(swap));
+    stream.on('unparsed', (result: { reason: string; signature: string }) =>
+      unparsed.push(result),
+    );
+    return { stream, cursors, swaps, unparsed, close: () => cursors.close() };
+  }
+
+  it('emits one swap per tracked wallet named in a single transaction', async () => {
+    const fetched: string[] = [];
+    const rpc: RpcClient = {
+      // Nothing from gap fill: every swap below can only have come from the
+      // socket, so the assertion is about routing and keying rather than replay.
+      getSignaturesForAddress: async () => [],
+      getTransaction: async (signature) => {
+        fetched.push(signature);
+        return txFor(signature, 101);
+      },
+    };
+    const sock = fakeSocket();
+    const h = pairHarness([WALLET, POOL], rpc, () => sock.socket);
+    try {
+      await h.stream.start();
+
+      // One transaction, two matching `mentions` filters: the server delivers
+      // it once per subscription, which is exactly what the collision case is.
+      sock.deliver('sig-1', 101, WALLET);
+      sock.deliver('sig-1', 101, POOL);
+      await tick();
+
+      expect(h.swaps).toHaveLength(2);
+      expect([...h.swaps.map((s) => s.wallet)].sort()).toEqual([POOL, WALLET].sort());
+      expect(new Set(h.swaps.map((s) => s.signature))).toEqual(new Set(['sig-1']));
+      // Opposite sides of one trade, which is what makes them two observations
+      // rather than one duplicated.
+      expect([...h.swaps.map((s) => s.side)].sort()).toEqual(['buy', 'sell']);
+      // Both admitted: a per-wallet cursor only advances on a dispatch
+      // attributed to that wallet.
+      expect(h.cursors.get(WALLET)?.lastSignature).toBe('sig-1');
+      expect(h.cursors.get(POOL)?.lastSignature).toBe('sig-1');
+      expect(fetched).toHaveLength(2);
+    } finally {
+      h.close();
+    }
+  });
+
+  it('dedupes the same (wallet, signature) across socket then gap fill', async () => {
+    const history = entries(1);
+    let listCalls = 0;
+    const fetched: string[] = [];
+    const rpc: RpcClient = {
+      // Startup yields nothing; every later call re-offers `sig-1` regardless of
+      // `until`, so the dedupe under test can only come from the seen set and
+      // never from the cursor having moved past it.
+      getSignaturesForAddress: async () => (++listCalls === 1 ? [] : history),
+      getTransaction: async (signature) => {
+        fetched.push(signature);
+        return txFor(signature, 101);
+      },
+    };
+    const sock = fakeSocket();
+    const h = pairHarness([WALLET], rpc, () => sock.socket);
+    try {
+      await h.stream.start();
+      sock.deliver('sig-1', 101, WALLET);
+      await tick();
+      expect(h.swaps).toHaveLength(1);
+      expect(fetched).toEqual(['sig-1']);
+
+      // Drop the socket: reconnect re-runs gap fill, which re-offers sig-1.
+      sock.socket.close();
+      await tick(6);
+
+      expect(h.swaps).toHaveLength(1);
+      expect(fetched).toEqual(['sig-1']);
+    } finally {
+      h.close();
+    }
+  });
+
+  it('does not suppress a second wallet on a signature the first admitted', async () => {
+    const history = entries(1);
+    const fetched: Array<string> = [];
+    const rpc: RpcClient = {
+      // Only WALLET has history, so POOL can reach `sig-1` over the socket
+      // alone — the cross-path case, gap fill first and socket second.
+      getSignaturesForAddress: async (address) => (address === WALLET ? history : []),
+      getTransaction: async (signature) => {
+        fetched.push(signature);
+        return txFor(signature, 101);
+      },
+    };
+    const sock = fakeSocket();
+    const h = pairHarness([WALLET, POOL], rpc, () => sock.socket);
+    try {
+      await h.stream.start();
+      expect(h.swaps.map((s) => s.wallet)).toEqual([WALLET]);
+      expect(h.cursors.get(POOL)?.lastSignature).toBeUndefined();
+
+      sock.deliver('sig-1', 101, POOL);
+      await tick();
+
+      expect(h.swaps).toHaveLength(2);
+      expect(h.swaps[1]?.wallet).toBe(POOL);
+      expect(h.cursors.get(POOL)?.lastSignature).toBe('sig-1');
+      expect(fetched).toEqual(['sig-1', 'sig-1']);
+    } finally {
+      h.close();
+    }
+  });
+
+  it('does not admit a wallet that was not in the transaction', async () => {
+    const fetched: string[] = [];
+    const rpc: RpcClient = {
+      getSignaturesForAddress: async () => [],
+      getTransaction: async (signature) => {
+        fetched.push(signature);
+        return txFor(signature, 101);
+      },
+    };
+    const sock = fakeSocket();
+    const h = pairHarness([ABSENT], rpc, () => sock.socket);
+    try {
+      await h.stream.start();
+
+      sock.deliver('sig-1', 101, ABSENT);
+      await tick();
+      expect(h.swaps).toHaveLength(0);
+      expect(h.unparsed.map((u) => u.reason)).toEqual(['WALLET_NOT_IN_TX']);
+      expect(fetched).toEqual(['sig-1']);
+
+      // Re-delivered. An admitted signature would be deduped and never fetched
+      // again; a mentions-only match must stay re-deliverable, because two of
+      // the three ways `parseSwap` reaches this code are degraded RPC responses
+      // rather than a genuine absence.
+      sock.deliver('sig-1', 101, ABSENT);
+      await tick();
+      expect(fetched).toEqual(['sig-1', 'sig-1']);
+    } finally {
+      h.close();
+    }
+  });
+});
