@@ -318,12 +318,24 @@ describe('secret hygiene', () => {
 // ---------------------------------------------------------------------------
 
 describe('soak digest', () => {
+  /**
+   * A digest over a ledger that STARTS this run at zero and ends it at
+   * `netFlow`, which is what a fresh soak actually sees.
+   *
+   * It used to hand back a constant. That was indistinguishable from a moving
+   * ledger only while the file began empty — and the drift check latches the
+   * opening value at construction so it can compare the run's own delta rather
+   * than the file's whole history. See `ledgerFlowAtStart`.
+   */
   function digestOf(netFlow: bigint = 0n): SoakDigest {
-    return new SoakDigest({
+    let flow = 0n;
+    const digest = new SoakDigest({
       startedAt: T0,
       startingLamports: 5_000_000_000n,
-      ledgerNetFlowLamports: () => netFlow,
+      ledgerNetFlowLamports: () => flow,
     });
+    flow = netFlow;
+    return digest;
   }
 
   const fill = (overrides: Partial<SimulatedFill> = {}): SimulatedFill => ({
@@ -659,4 +671,69 @@ describe('crash drill', () => {
     },
     120_000,
   );
+});
+
+/**
+ * The drift check compared a per-process counter against a cumulative ledger, so
+ * it fired on every healthy run against a ledger that was not brand new. Session
+ * 23's first-ever final digest reported `PAPER BALANCE DRIFT of -106789862
+ * lamports` — the two open positions it had legitimately inherited on restart.
+ *
+ * A warning that fires on healthy runs is training to ignore warnings.
+ */
+describe('paper balance drift, against a ledger that already had history', () => {
+  const T0 = 1_700_000_000_000;
+  const MINT = 'So11111111111111111111111111111111111111112';
+
+  const aFill = (): SimulatedFill => ({
+    intentId: 'i',
+    side: 'buy',
+    mint: MINT,
+    tokensDelta: 1_000_000_000n,
+    lamportsDelta: -50_000_000n,
+    decimals: 6,
+    feesLamports: 85_000n,
+    slippageBps: 0,
+    simulated: true,
+    at: T0,
+  });
+
+  function digestOnExisting(opening: bigint, netFlow: bigint): SoakDigest {
+    let flow = opening;
+    const digest = new SoakDigest({
+      startedAt: T0,
+      startingLamports: 5_000_000_000n,
+      ledgerNetFlowLamports: () => flow,
+    });
+    flow = opening + netFlow;
+    return digest;
+  }
+
+  it('reports no drift when this run agrees, whatever the ledger inherited', () => {
+    // -106,789,862 is what session 23 actually inherited from the run before it.
+    const digest = digestOnExisting(-106_789_862n, -50_085_000n);
+    digest.observe('fill', aFill());
+
+    const snapshot = digest.snapshot(T0);
+    expect(snapshot.money.paperBalanceDrift).toBe('0');
+    expect(snapshot.findings).toEqual([]);
+  });
+
+  it('still catches a genuine disagreement inside the run', () => {
+    const digest = digestOnExisting(-106_789_862n, -99_999_999n);
+    digest.observe('fill', aFill());
+
+    const snapshot = digest.snapshot(T0);
+    expect(snapshot.money.paperBalanceDrift).not.toBe('0');
+    expect(snapshot.findings[0]).toMatch(/PAPER BALANCE DRIFT/);
+  });
+
+  it('still reports the ledger\'s cumulative balance, not just this run\'s', () => {
+    const digest = digestOnExisting(-106_789_862n, -50_085_000n);
+    digest.observe('fill', aFill());
+    // 5 SOL starting, less everything the file has ever spent.
+    expect(digest.snapshot(T0).money.paperBalanceLamports).toBe(
+      String(5_000_000_000n - 106_789_862n - 50_085_000n),
+    );
+  });
 });

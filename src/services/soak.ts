@@ -158,7 +158,27 @@ export class SoakDigest {
   /** Per-mint running cost basis, so realized P&L matches `replayMint`'s rule. */
   private readonly held = new Map<string, { tokens: bigint; cost: bigint }>();
 
-  constructor(private readonly options: SoakDigestOptions) {}
+  /**
+   * The ledger's cumulative net flow when this run began.
+   *
+   * The drift check compares the event stream's arithmetic against the ledger's,
+   * and `eventNetFlow` only ever counts fills **this process** saw — while
+   * `ledgerNetFlowLamports()` is cumulative on disk across every run the file has
+   * ever had. On a fresh ledger those are the same number and the check was
+   * right; against a pre-existing ledger they differ by exactly the prior runs'
+   * flow, and the finding fired on a completely healthy soak.
+   *
+   * Session 23's first-ever final digest reported `PAPER BALANCE DRIFT of
+   * -106789862 lamports`, which was the two open positions it had legitimately
+   * inherited. A warning that fires on healthy runs is training to ignore
+   * warnings, so the baseline is latched here and the comparison is delta
+   * against delta.
+   */
+  private readonly ledgerFlowAtStart: bigint;
+
+  constructor(private readonly options: SoakDigestOptions) {
+    this.ledgerFlowAtStart = options.ledgerNetFlowLamports();
+  }
 
   /**
    * Feed one tracker event.
@@ -262,8 +282,9 @@ export class SoakDigest {
     const ledgerFlow = this.options.ledgerNetFlowLamports();
     const balance = this.options.startingLamports + ledgerFlow;
     // The event stream's own arithmetic against the ledger's. Two independent
-    // routes to one number; they must agree exactly.
-    const drift = ledgerFlow - this.eventNetFlow;
+    // routes to one number; they must agree exactly — but only over the same
+    // window, which is why the ledger side is measured from `ledgerFlowAtStart`.
+    const drift = ledgerFlow - this.ledgerFlowAtStart - this.eventNetFlow;
 
     const trackedTotal = [...this.venues.values()].reduce((a, b) => a + b, 0);
     const unparsedTotal = [...this.unparsed.values()].reduce((a, b) => a + b, 0);

@@ -68,7 +68,34 @@ export interface WalletStreamDeps {
 // ---------------------------------------------------------------------------
 
 export const HEARTBEAT_INTERVAL_MS = 30_000;
-export const SILENCE_TIMEOUT_MS = 90_000;
+/**
+ * How long a connected socket may deliver nothing before it is torn down.
+ *
+ * ── DERIVED IN SESSION 24, FROM DATA THAT HAD TO BE CLEANED FIRST ─────────
+ *
+ * Session 23 reported the largest healthy gap between live socket deliveries as
+ * **4.5 minutes** and this value was never exercised at all, because nothing
+ * called `heartbeat()`. Both numbers were wrong in the same direction.
+ *
+ * That 4.5 minutes was an artifact: the host slept for **84.9 of that soak's
+ * 113.9 minutes**, and the long gaps were the machine, not the feed. Excluding
+ * every gap that overlaps a `pmset` sleep window, the true distribution over 356
+ * samples is **p50 2.6s, p90 14.8s, p99 29.7s, max 57.5s**.
+ *
+ * 180s is ~3.1x the worst genuinely-healthy gap. The old 90s is only 1.57x it,
+ * and the failure that margin protects against is not a missed teardown but a
+ * **reconnect storm**: on a quiet market a too-tight timeout tears down, gap
+ * fills, finds nothing, goes silent, and tears down again — 13 wallets' worth of
+ * `getSignaturesForAddress` every 90 seconds, against a provider that
+ * rate-limits at ~10 rps.
+ *
+ * Raised rather than left at 90s because this is the moment the constant stops
+ * being dead code and starts having consequences; it is chosen from measurement,
+ * not relaxed to make anything pass. The asymmetry still favours detecting: a
+ * spurious teardown costs one gap fill, and the cursor guarantees nothing is
+ * lost by it.
+ */
+export const SILENCE_TIMEOUT_MS = 180_000;
 export const BACKOFF_MIN_MS = 1_000;
 export const BACKOFF_MAX_MS = 30_000;
 /** Bound on history replayed when the cursor is unusable. */
@@ -252,10 +279,25 @@ export interface UnknownSubscriptionEvent {
 }
 
 export interface QueueOverflowEvent {
-  wallet: Address;
+  /**
+   * The wallet whose arrival pushed the queue over. **Not** the wallet that lost
+   * anything.
+   *
+   * This field used to be called `wallet`, and every shed-by-wallet figure in
+   * this repo's history was read as if it named the victim. It never did: the
+   * queue is global and `splice(0, n)` removes the OLDEST entries, which belong
+   * to whoever queued first. Session 23 reported "26 of 37 sheds belong to one
+   * wallet" on this field — that is the wallet that was *arriving*, and the
+   * conclusion drawn from it is void.
+   */
+  arrivingWallet: Address;
   dropped: number;
   /** Queue depth cap that was exceeded, so a session says what it was measured against. */
   capacity: number;
+  /** Who actually lost entries, and how many each. The number worth reading. */
+  droppedFor: Array<{ wallet: Address; count: number }>;
+  /** Exactly which signatures were shed, so the loss is enumerable after the fact. */
+  droppedSignatures: string[];
 }
 
 export interface GapFilledEvent {
@@ -314,6 +356,8 @@ export class WalletStream extends EventEmitter {
   private readonly queue: Array<{ wallet: Address; entry: SignatureEntry; source: SwapSource }> = [];
   private socket: StreamSocket | undefined;
   private running = false;
+  /** One reconnect loop at a time. See `beginReconnect`. */
+  private reconnecting = false;
   private draining = false;
   private attempt = 0;
   private lastMessageAt = 0;
@@ -337,7 +381,7 @@ export class WalletStream extends EventEmitter {
     // Gap fill on startup as well as on reconnect: the process may have been
     // down for any length of time, and the cursor is the only record of that.
     for (const wallet of this.deps.wallets) await this.gapFill(wallet);
-    await this.connect();
+    if (!(await this.connectOnce())) this.beginReconnect();
   }
 
   stop(): void {
@@ -346,7 +390,17 @@ export class WalletStream extends EventEmitter {
     this.socket = undefined;
   }
 
-  private async connect(): Promise<void> {
+  /**
+   * Attempt exactly one connection. Never starts a reconnect of its own.
+   *
+   * Splitting this out is the fix for chain multiplication. The old `connect()`
+   * routed its own failure through `onDisconnect`, which started a *new*
+   * reconnect while the one that had called it was still unwinding — so the
+   * number of live chains was set by however many ways a connection had failed,
+   * and never came back down. Retrying is now the loop in `reconnect()`, which
+   * there is only ever one of.
+   */
+  private async connectOnce(): Promise<boolean> {
     try {
       const socket = await this.deps.connect();
       this.socket = socket;
@@ -378,16 +432,41 @@ export class WalletStream extends EventEmitter {
           }),
         );
       }
+      return true;
     } catch (error) {
       this.emit('error', error as Error);
-      this.onDisconnect((error as Error).message);
+      this.socket = undefined;
+      // Reported, because a failed attempt is as much a part of an outage's
+      // shape as the disconnection that started it. It does NOT start a chain.
+      this.emit('disconnected', { reason: (error as Error).message });
+      return false;
     }
   }
 
+  /**
+   * One socket death, one reconnect.
+   *
+   * Reached more than once per disconnection in practice: a real WebSocket fires
+   * `error` and then `close`, and session 23's session file shows exactly that —
+   * `websocket error` and `closed` one millisecond apart, after which reconnect
+   * attempts arrived in pairs for the remaining 43 minutes. `this.socket` is the
+   * flag: the first call clears it, and every later call for the same socket
+   * finds it already gone and returns.
+   */
   private onDisconnect(reason: string): void {
+    if (this.socket === undefined) return;
     this.socket = undefined;
     this.emit('disconnected', { reason });
-    if (this.running) void this.reconnect();
+    this.beginReconnect();
+  }
+
+  /** Start the single reconnect loop, if one is not already running. */
+  private beginReconnect(): void {
+    if (!this.running || this.reconnecting) return;
+    this.reconnecting = true;
+    void this.reconnect().finally(() => {
+      this.reconnecting = false;
+    });
   }
 
   /** Full jitter over an exponential base, uncapped in attempts. */
@@ -396,18 +475,33 @@ export class WalletStream extends EventEmitter {
     return Math.floor(this.deps.random() * ceiling);
   }
 
+  /**
+   * Retry until connected, then backfill. One of these runs at a time.
+   *
+   * A loop rather than recursion through `onDisconnect`, so the retry budget
+   * belongs to one place and cannot fan out. The gap fill afterwards is the
+   * point of the whole exercise: reconnecting without it leaves the window the
+   * socket was down for permanently unobserved, and `reconnected` would be
+   * reporting success for something that recovered nothing.
+   */
   private async reconnect(): Promise<void> {
-    this.attempt += 1;
-    await this.deps.sleep(this.backoffMs());
-    if (!this.running) return;
+    for (;;) {
+      this.attempt += 1;
+      const attempt = this.attempt;
+      await this.deps.sleep(this.backoffMs());
+      if (!this.running) return;
 
-    await this.connect();
-    if (this.socket === undefined) return;
+      if (!(await this.connectOnce())) {
+        if (!this.running) return;
+        continue;
+      }
 
-    // Anything that happened while the socket was down is only recoverable
-    // through the cursor.
-    for (const wallet of this.deps.wallets) await this.gapFill(wallet);
-    this.emit('reconnected', { attempt: this.attempt });
+      // Anything that happened while the socket was down is only recoverable
+      // through the cursor.
+      for (const wallet of this.deps.wallets) await this.gapFill(wallet);
+      this.emit('reconnected', { attempt });
+      return;
+    }
   }
 
   // -- heartbeat ------------------------------------------------------------
@@ -417,14 +511,29 @@ export class WalletStream extends EventEmitter {
    * triggered. Exposed rather than owning a timer so tests can step it.
    */
   heartbeat(healthy: boolean): boolean {
+    // Nothing connected means a reconnect is already the thing in progress, and
+    // there is no socket to tear down. Without this guard the silence check
+    // stays true for as long as the feed is quiet — `lastMessageAt` only moves
+    // on a delivered frame — so every tick would start another reconnect and
+    // they would multiply for the length of the outage.
+    const socket = this.socket;
+    if (socket === undefined) return false;
+
     this.missedHeartbeats = healthy ? 0 : this.missedHeartbeats + 1;
     const silentFor = this.deps.now() - this.lastMessageAt;
 
     if (this.missedHeartbeats >= 2 || silentFor >= SILENCE_TIMEOUT_MS) {
-      this.socket?.close();
-      this.onDisconnect(
-        this.missedHeartbeats >= 2 ? 'two heartbeats missed' : `silent for ${silentFor}ms`,
-      );
+      const reason =
+        this.missedHeartbeats >= 2 ? 'two heartbeats missed' : `silent for ${silentFor}ms`;
+      // Announced BEFORE the raw socket is closed. Closing it first would fire
+      // `onClose`, which reports `closed` and claims the disconnection, and the
+      // real reason — the one naming why anybody intervened — would be lost.
+      this.onDisconnect(reason);
+      try {
+        socket.close();
+      } catch {
+        // Already closing. The teardown has happened either way.
+      }
       return true;
     }
     return false;
@@ -493,14 +602,22 @@ export class WalletStream extends EventEmitter {
     this.queue.push({ wallet, entry, source });
     if (this.queue.length > MAX_IN_FLIGHT) {
       const dropped = this.queue.length - MAX_IN_FLIGHT;
-      this.queue.splice(0, dropped);
+      // `splice` returns what it removed, which is the only place the identity
+      // of the loss exists. Discarding it and reporting the arriving wallet
+      // instead is what made every historical shed-by-wallet number wrong.
+      const removed = this.queue.splice(0, dropped);
+      const counts = new Map<Address, number>();
+      for (const item of removed) counts.set(item.wallet, (counts.get(item.wallet) ?? 0) + 1);
+
       this.emit('error', Object.assign(new Error('fetch queue overflow'), { dropped }));
       // Also as its own event, because `error` is excluded from recording by
       // name and this is the only measurement of how much feed was shed.
       this.emit('queue-overflow', {
-        wallet,
+        arrivingWallet: wallet,
         dropped,
         capacity: MAX_IN_FLIGHT,
+        droppedFor: [...counts].map(([victim, count]) => ({ wallet: victim, count })),
+        droppedSignatures: removed.map((item) => item.entry.signature),
       } satisfies QueueOverflowEvent);
     }
     void this.drain();

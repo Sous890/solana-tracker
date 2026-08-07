@@ -203,6 +203,11 @@ export function parseSession(text: string, label: string): LoadedSession {
           tick: line.payload as PriceTickPayload,
         });
         break;
+      case 'decision':
+        // Carried, never driven — which is what keeps recording a refusal from
+        // letting a session be replayed into agreement with itself. The replay
+        // regenerates its own rejections through the real guard layer.
+        break;
       case 'unmodeled':
         // Carried, never driven. It is evidence about the schema, and the soak
         // digest counts it by tag; a replay has nothing to do with it.

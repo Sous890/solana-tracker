@@ -87,7 +87,11 @@ import { createStreamSocketFactory } from '../adapters/streamSocket.js';
 import { createJupiterQuoteSource } from '../adapters/jupiter.js';
 import { createPaperBroker } from '../adapters/paperBroker.js';
 import { createDecimalsResolver } from '../adapters/mintMetadata.js';
-import { WalletStream } from '../adapters/walletStream.js';
+import {
+  HEARTBEAT_INTERVAL_MS,
+  SILENCE_TIMEOUT_MS,
+  WalletStream,
+} from '../adapters/walletStream.js';
 import { StrategyRunner } from './strategyRunner.js';
 import { SessionRecorder } from './recorder.js';
 import { LedgerSnapshotter, assertLedgerPresent } from './ledgerDurability.js';
@@ -211,6 +215,19 @@ export interface RejectionEvent {
   intentId: string;
   side: OrderIntent['side'];
   mint: Address;
+  /**
+   * The age guard gate 3 actually judged, when there was one.
+   *
+   * Carried here because it cannot be carried anywhere else: `intents` has no
+   * column for it (CLAUDE.md gap 8) and `db/ledger.ts` is out of scope without a
+   * signed sign-off. The recorder writes it onto a `decision` line, so a session
+   * file can finally answer "272 STALE_SIGNAL refusals — and how stale?" without
+   * anybody inferring an age from timestamps, which that gap forbids.
+   *
+   * Absent for exits and for an operator's manual order, which is exactly the
+   * population the freshness gate does not apply to.
+   */
+  signalAgeMs?: number;
   /** The `GuardCode`, e.g. `CANNOT_SELL`. */
   code: string;
   /**
@@ -247,6 +264,15 @@ export interface TrackerLogger {
 export interface WalletFeed extends EventEmitter {
   start(): Promise<void>;
   stop(): void;
+  /**
+   * Liveness tick. Returns true when it tore the socket down.
+   *
+   * Optional so every existing `WalletFeed` fake stays valid — but `WalletStream`
+   * implements it, and `ensureLoops` calls it. It was implemented and never
+   * called at all until session 24, which is why a socket that went quiet
+   * without erroring was invisible: the detector existed and nothing drove it.
+   */
+  heartbeat?(healthy: boolean): boolean;
 }
 
 /**
@@ -338,6 +364,7 @@ export interface TrackerDeps {
   scheduler?: Scheduler;
   priceIntervalMs?: number;
   screenIntervalMs?: number;
+  heartbeatIntervalMs?: number;
   eventBufferSize?: number;
   /** Absent, or `enabled: false`, records nothing and opens no file. */
   recording?: RecordingOptions;
@@ -414,6 +441,7 @@ export class Tracker extends EventEmitter {
   private readonly scheduler: Scheduler;
   private readonly priceIntervalMs: number;
   private readonly screenIntervalMs: number;
+  private readonly heartbeatIntervalMs: number;
   private readonly eventBufferSize: number;
 
   /** The guarded broker. The only execution surface anything else may reach. */
@@ -435,6 +463,7 @@ export class Tracker extends EventEmitter {
 
   private priceHandle: unknown;
   private screenHandle: unknown;
+  private heartbeatHandle: unknown;
   private priceTickRunning = false;
   private screenTickRunning = false;
 
@@ -462,6 +491,7 @@ export class Tracker extends EventEmitter {
     this.scheduler = deps.scheduler ?? realScheduler;
     this.priceIntervalMs = deps.priceIntervalMs ?? PRICE_INTERVAL_MS;
     this.screenIntervalMs = deps.screenIntervalMs ?? SCREEN_INTERVAL_MS;
+    this.heartbeatIntervalMs = deps.heartbeatIntervalMs ?? HEARTBEAT_INTERVAL_MS;
     this.eventBufferSize = deps.eventBufferSize ?? EVENT_BUFFER_SIZE;
 
     // Read once from disk. The flag is written through on every change, and
@@ -876,11 +906,33 @@ export class Tracker extends EventEmitter {
             code: cause.code,
             rejectionCode,
             reason: cause.reason,
+            ...(intent.signalAgeMs === undefined ? {} : { signalAgeMs: intent.signalAgeMs }),
           };
           this.record('rejection', event);
         } else {
-          // The broker resolves its own failures; this is only the alert.
           this.recordError(cause as Error, `execute ${intent.id}`);
+
+          // The broker resolves its own failures — but only once it has been
+          // reached. Guard gates 7 and 8 `await inner.getQuote()` and
+          // `inner.canSell()` with no `try`, so a quote outage or a screener
+          // throw comes out of `guarded().execute` as something that is not a
+          // `GuardRejection`, ahead of the inner broker. Nothing downstream had
+          // recorded the intent, nothing above recognised the error, and the row
+          // stayed `pending` for ever — six of them in session 23, which
+          // `reconcileOnStartup` then turned into `CRASH_ORPHAN`s that shut the
+          // entry gate until an operator cleared them by hand.
+          //
+          // Conditional on the status, not unconditional: when the broker DID
+          // run and resolved this itself, that resolution is the accurate one
+          // and must not be relabelled by whoever unwinds last.
+          if (this.deps.ledger.getIntentStatus(intent.id) === 'pending') {
+            this.deps.ledger.resolveIntent(
+              intent.id,
+              'failed',
+              (cause as Error).name || 'EXECUTION_ERROR',
+              this.now(),
+            );
+          }
         }
         throw cause;
       }
@@ -928,6 +980,7 @@ export class Tracker extends EventEmitter {
       code,
       rejectionCode: code,
       reason,
+      ...(intent.signalAgeMs === undefined ? {} : { signalAgeMs: intent.signalAgeMs }),
     };
     this.record('rejection', event);
     this.deps.logger.warn(
@@ -953,6 +1006,23 @@ export class Tracker extends EventEmitter {
         void this.screenTick();
       }, this.screenIntervalMs);
     }
+    if (this.heartbeatHandle === undefined) {
+      this.heartbeatHandle = this.scheduler.setInterval(() => {
+        // `healthy` is `true` because this process has no cheap independent
+        // liveness signal: the only thing that could contradict the socket is
+        // another network call, and the provider rate-limits at ~10 rps. So the
+        // silence limb is the detector here, and the `missedHeartbeats` limb is
+        // reserved for an injected health probe that does not exist yet. Stated
+        // rather than papered over with a signal that always agrees.
+        const torn = this.deps.stream.heartbeat?.(true) ?? false;
+        if (torn) {
+          this.recordError(
+            new Error(`wallet stream torn down: silent for at least ${SILENCE_TIMEOUT_MS}ms`),
+            'stream heartbeat',
+          );
+        }
+      }, this.heartbeatIntervalMs);
+    }
   }
 
   private stopLoops(): void {
@@ -963,6 +1033,10 @@ export class Tracker extends EventEmitter {
     if (this.screenHandle !== undefined) {
       this.scheduler.clearInterval(this.screenHandle);
       this.screenHandle = undefined;
+    }
+    if (this.heartbeatHandle !== undefined) {
+      this.scheduler.clearInterval(this.heartbeatHandle);
+      this.heartbeatHandle = undefined;
     }
   }
 

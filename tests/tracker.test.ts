@@ -23,6 +23,7 @@ import { createPaperBroker } from '../src/adapters/paperBroker.js';
 import { createDecimalsResolver, fixtureDecimalsSource } from '../src/adapters/mintMetadata.js';
 import { openLedger } from '../src/db/ledger.js';
 import type { Ledger } from '../src/db/ledger.js';
+import { HEARTBEAT_INTERVAL_MS } from '../src/adapters/walletStream.js';
 import { openRuntimeState } from '../src/db/runtimeState.js';
 import type { RuntimeState } from '../src/db/runtimeState.js';
 import {
@@ -57,6 +58,15 @@ class FakeStream extends EventEmitter implements WalletFeed {
   starts = 0;
   stops = 0;
   startError: Error | undefined;
+  /** Liveness ticks the tracker drove, and what it claimed about health. */
+  readonly heartbeats: boolean[] = [];
+  /** Set to make the next heartbeat report that it tore the socket down. */
+  heartbeatTearsDown = false;
+
+  heartbeat(healthy: boolean): boolean {
+    this.heartbeats.push(healthy);
+    return this.heartbeatTearsDown;
+  }
 
   async start(): Promise<void> {
     if (this.startError !== undefined) throw this.startError;
@@ -320,7 +330,7 @@ describe('state machine', () => {
     const h = open();
     expect(h.scheduler.active).toBe(0);
     await h.tracker.start();
-    expect(h.scheduler.active).toBe(2);
+    expect(h.scheduler.active).toBe(3);
   });
 
   it('REFUSES a double start, and does not open a second subscription', async () => {
@@ -508,7 +518,7 @@ describe('stop() sells nothing', () => {
     // stop() deliberately left the book open, so the alerts that tell an
     // operator the book has gone bad must outlive it. Tearing the loops down
     // here would mean a position becoming unexitable in silence.
-    expect(h.scheduler.active).toBe(2);
+    expect(h.scheduler.active).toBe(3);
   });
 
   it('still detects a lost route on what it left behind', async () => {
@@ -1227,7 +1237,11 @@ describe('held-position screen', () => {
     // every screen a real round trip; at 30s that is 0.1 req/s against a
     // 3-position cap, where the 2s price cadence would make it 1.5 req/s
     // forever — a transient outage turning into a rate-limit ban.
-    expect(h.scheduler.intervals).toEqual([PRICE_INTERVAL_MS, SCREEN_INTERVAL_MS]);
+    expect(h.scheduler.intervals).toEqual([
+      PRICE_INTERVAL_MS,
+      SCREEN_INTERVAL_MS,
+      HEARTBEAT_INTERVAL_MS,
+    ]);
     expect(SCREEN_INTERVAL_MS).toBe(15 * PRICE_INTERVAL_MS);
   });
 
@@ -1452,6 +1466,149 @@ describe('an orderly stop invents no crash orphan (real child process)', () => {
       }
     } finally {
       rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Stream liveness is driven by the tracker
+// ---------------------------------------------------------------------------
+
+/**
+ * `WalletStream.heartbeat()` was implemented and called from nowhere — not the
+ * tracker, not the CLIs, not a test — so `SILENCE_TIMEOUT_MS` was dead and a
+ * socket that stopped delivering without erroring was undetectable. Session 23
+ * found that by watching a two-hour soak. This is the ninety-second version.
+ */
+describe('stream liveness', () => {
+  it('drives the stream heartbeat from a loop it registered', async () => {
+    const h = open();
+    try {
+      await h.tracker.start();
+      expect(h.stream.heartbeats).toHaveLength(0);
+
+      // Index 2: price, screen, then heartbeat. Firing the scheduler's own
+      // handler is the part a direct call to `heartbeat()` would never exercise,
+      // and "nothing calls it" was the entire defect.
+      h.scheduler.fire(2);
+      await new Promise((resolve) => setImmediate(resolve));
+
+      expect(h.stream.heartbeats).toEqual([true]);
+    } finally {
+      h.close();
+    }
+  });
+
+  it('reports a teardown so a silent socket is loud', async () => {
+    const h = open();
+    try {
+      await h.tracker.start();
+      h.stream.heartbeatTearsDown = true;
+      h.scheduler.fire(2);
+      await new Promise((resolve) => setImmediate(resolve));
+
+      const errors = h.events.filter((event) => event.type === 'error');
+      expect(errors.some((event) => /silent for/.test(JSON.stringify(event.data)))).toBe(true);
+    } finally {
+      h.close();
+    }
+  });
+
+  it('stops driving liveness once the loops are torn down', async () => {
+    const h = open();
+    try {
+      await h.tracker.start();
+      await h.tracker.stop();
+      // Idle and flat: the loops go, and so does the liveness tick, because
+      // there is no subscription left to be silent.
+      expect(h.scheduler.active).toBe(0);
+    } finally {
+      h.close();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// An intent must always end up resolved
+// ---------------------------------------------------------------------------
+
+/**
+ * Session 23 left six buy intents `pending` for over an hour, through a clean
+ * shutdown, and they became `CRASH_ORPHAN`s that shut the entry gate on the next
+ * boot. Session 24 found the mechanism, and it is not a race.
+ *
+ * Guard gates 7 and 8 do `await inner.getQuote(intent)` and
+ * `await inner.canSell(intent.mint)` with no `try`. A quote outage therefore
+ * throws a `QuoteUnavailableError` — not a `GuardRejection` — out of
+ * `guarded().execute` **before the inner broker runs at all**. The broker
+ * resolves its own failures, but it never ran; the guard layer resolves its own
+ * rejections, but this was not one; and the tracker only logged it. Nobody owned
+ * the row.
+ *
+ * The timing in the session file is unambiguous: the first `UPSTREAM_ERROR`
+ * quote landed at 15:51:36.011 and the first intent that never resolved was
+ * created at 15:51:50.911, 14.9 seconds later. Quote errors went from 5.9% of
+ * quotes before that boundary to 70.3% after it, and every buy from then on hung.
+ */
+describe('intent resolution is total', () => {
+  it('resolves an intent whose execution threw before the broker was reached', async () => {
+    const h = open({
+      canSell: async () => ({ ok: true }),
+      // Thrown where a quote outage throws it: inside `execute`, ahead of the
+      // paper broker, so nothing downstream has recorded or resolved anything.
+      beforeExecute: async () => {
+        throw new Error('quote provider is down: UPSTREAM_ERROR');
+      },
+    });
+    try {
+      await h.tracker.start();
+
+      await expect(h.tracker.submit(buyIntent({ id: 'stranded' }))).rejects.toThrow(
+        /UPSTREAM_ERROR/,
+      );
+
+      // The whole point. `pending` here is what became a CRASH_ORPHAN and shut
+      // the entry gate until an operator ran `npm run orphans` by hand.
+      expect(h.ledger.getIntentStatus('stranded')).not.toBe('pending');
+      expect(h.ledger.getIntentStatus('stranded')).toBe('failed');
+    } finally {
+      h.close();
+    }
+  });
+
+  it('leaves no unacknowledged orphan behind after such a failure', async () => {
+    const h = open({
+      canSell: async () => ({ ok: true }),
+      beforeExecute: async () => {
+        throw new Error('quote provider is down: UPSTREAM_ERROR');
+      },
+    });
+    try {
+      await h.tracker.start();
+      await expect(h.tracker.submit(buyIntent({ id: 'stranded-2' }))).rejects.toThrow();
+
+      // A restart reconciles: nothing was left pending, so nothing is orphaned
+      // and gate 0 stays open without an operator touching it.
+      const report = h.ledger.reconcileOnStartup(NOW);
+      expect(report.orphaned).toHaveLength(0);
+      expect(h.ledger.getUnacknowledgedOrphanCount()).toBe(0);
+    } finally {
+      h.close();
+    }
+  });
+
+  it('does not overwrite a resolution the broker already made', async () => {
+    // The broker resolves its own failures. The safety net must not relabel
+    // one that was already handled, or every broker-side `failed` would be
+    // rewritten by whoever unwound last.
+    const h = open({ canSell: async () => ({ ok: true }) });
+    try {
+      await h.tracker.start();
+      const fill = await h.tracker.submit(buyIntent({ id: 'clean' }));
+      expect(fill.intentId).toBe('clean');
+      expect(h.ledger.getIntentStatus('clean')).toBe('filled');
+    } finally {
+      h.close();
     }
   });
 });

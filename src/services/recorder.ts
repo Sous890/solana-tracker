@@ -42,7 +42,13 @@ import type { Address, Position, Quote, TrackedSwap, UnixMillis } from '../core/
 // Line format
 // ---------------------------------------------------------------------------
 
-export type SessionKind = 'swap' | 'quote' | 'screen' | 'price-tick' | 'unmodeled';
+export type SessionKind =
+  | 'swap'
+  | 'quote'
+  | 'screen'
+  | 'price-tick'
+  | 'decision'
+  | 'unmodeled';
 
 /**
  * The fifth kind: everything the recorder met and could not classify.
@@ -116,6 +122,49 @@ export interface PriceTickPayload {
   priceSol: string;
   tokens: string;
   decimals: number;
+}
+
+/**
+ * A refusal, recorded so a session can say what the bot decided and why not.
+ *
+ * ── WHY THIS DOES NOT BREAK "INPUTS ONLY" ─────────────────────────────────
+ *
+ * A rejection is an output, and outputs are excluded because a session carrying
+ * them could be replayed into agreement with itself. That argument applies to
+ * anything a replay CONSUMES. A `decision` line is never consumed: the replay
+ * loader carries it and drives nothing from it, exactly as it does `unmodeled`,
+ * so the regenerated rejections still have to stand on their own.
+ *
+ * It gets its own kind rather than riding on `unmodeled` because the unmodeled
+ * count is a falsifiability signal — "the four kinds were argued sufficient and
+ * nothing measured it" — and filling it with refusals the recorder fully
+ * understands would destroy the one number that can contradict the schema.
+ *
+ * ── WHAT IT BUYS ──────────────────────────────────────────────────────────
+ *
+ * Session 23 could not rebuild the destroyed ledger's intents from any session
+ * file, and this is why: guard gate 3 runs before the broker's first quote, so a
+ * `STALE_SIGNAL` refusal produced no quote, no screen and no tick. All that
+ * survived was the originating swap, which is byte-for-byte identical to a swap
+ * the strategy declined to act on. 272 refusals on 2026-08-05 were unrecoverable
+ * for that reason.
+ *
+ * `signalAgeMs` also lands here, which is the only place it can. `intents` has
+ * no column for it (CLAUDE.md gap 8) and `db/ledger.ts` needs a signed sign-off.
+ * This is the measured value at the moment the gate read it — not a backfill and
+ * not inferred from timestamps, both of which that gap explicitly forbids.
+ */
+export interface DecisionPayload {
+  intentId: string;
+  side: 'buy' | 'sell';
+  mint: Address;
+  /** The guard code, e.g. `STALE_SIGNAL`. */
+  code: string;
+  /** As persisted on `intents.rejection_code`; may carry a sub-reason. */
+  rejectionCode: string;
+  reason: string;
+  /** The age the freshness gate actually judged. Absent for exits and manual orders. */
+  signalAgeMs?: number;
 }
 
 export interface SwapPayload {
@@ -285,7 +334,9 @@ export const EXCLUDED_TRACKER_EVENTS: ReadonlySet<string> = new Set([
   // be replayed into agreement with itself.
   'intent-created',
   'fill',
-  'rejection',
+  // NOTE: 'rejection' used to be here. It is now written as a `decision` line,
+  // which the replay loader carries and never drives, so the self-agreement
+  // argument still holds. See `DecisionPayload`.
   // Derived from a quote or a screen, both of which ARE recorded.
   'route-lost',
   'sellability-degraded',
@@ -509,6 +560,27 @@ export class SessionRecorder {
     tracker.on('event', (record) => {
       if (record.type === 'swap-detected') {
         this.write('swap', encodeSwap(record.data as TrackedSwap));
+        return;
+      }
+      if (record.type === 'rejection') {
+        const data = record.data as {
+          intentId: string;
+          side: 'buy' | 'sell';
+          mint: Address;
+          code: string;
+          rejectionCode: string;
+          reason: string;
+          signalAgeMs?: number;
+        };
+        this.write('decision', {
+          intentId: data.intentId,
+          side: data.side,
+          mint: data.mint,
+          code: data.code,
+          rejectionCode: data.rejectionCode,
+          reason: data.reason,
+          ...(data.signalAgeMs === undefined ? {} : { signalAgeMs: data.signalAgeMs }),
+        } satisfies DecisionPayload);
         return;
       }
       if (EXCLUDED_TRACKER_EVENTS.has(record.type)) return;

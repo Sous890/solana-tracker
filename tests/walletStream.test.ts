@@ -6,6 +6,8 @@ import type { TrackedSwap } from '../src/core/types.js';
 import {
   MAX_COLD_FILL,
   MAX_IN_FLIGHT,
+
+  SILENCE_TIMEOUT_MS,
   SeenSignatures,
   WalletStream,
   orderOldestFirst,
@@ -1016,6 +1018,271 @@ describe('seen set keyed on (wallet, signature)', () => {
       sock.deliver('sig-1', 101, ABSENT);
       await tick();
       expect(fetched).toEqual(['sig-1', 'sig-1']);
+    } finally {
+      h.close();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Silence detection and reconnect — fault injection
+// ---------------------------------------------------------------------------
+
+/**
+ * Session 23 discovered `heartbeat()` was never called by watching a two-hour
+ * soak. It has been dead since the file was written, and ninety seconds of fault
+ * injection would have said so. These tests are that instrument.
+ *
+ * They cover three things the soak conflated:
+ *   1. a socket that goes silent WITHOUT erroring is detected at all;
+ *   2. a reconnect re-subscribes and, crucially, BACKFILLS the window it missed;
+ *   3. one socket death produces one reconnect, not one per event the socket
+ *      happened to emit on its way out.
+ *
+ * A socket of their own, rather than `fakeSocket`, because these need to fire
+ * `error` and `close` independently — which is exactly what a real WebSocket
+ * does on its way down, and what `fakeSocket` has no way to express.
+ */
+describe('silence detection and reconnect', () => {
+  const tick = async (times = 4): Promise<void> => {
+    for (let i = 0; i < times; i += 1) await new Promise((r) => setImmediate(r));
+  };
+
+  /** A socket whose failure modes are drivable from the test. */
+  function faultSocket(firstSubscriptionId: number) {
+    let onMessage: (data: string) => void = () => undefined;
+    let onClose: () => void = () => undefined;
+    let onError: (error: Error) => void = () => undefined;
+    const subscriptionIds = new Map<string, number>();
+    let next = firstSubscriptionId;
+    const sent: string[] = [];
+
+    const socket: StreamSocket = {
+      send: (payload) => {
+        sent.push(payload);
+        const request = JSON.parse(payload) as {
+          id?: number;
+          method?: string;
+          params?: [{ mentions?: string[] }, unknown];
+        };
+        if (request.method !== 'logsSubscribe') return;
+        const wallet = request.params?.[0]?.mentions?.[0];
+        if (wallet === undefined || request.id === undefined) return;
+        const subscription = next++;
+        subscriptionIds.set(wallet, subscription);
+        onMessage(JSON.stringify({ jsonrpc: '2.0', result: subscription, id: request.id }));
+      },
+      close: () => onClose(),
+      onMessage: (h) => {
+        onMessage = h;
+      },
+      onClose: (h) => {
+        onClose = h;
+      },
+      onError: (h) => {
+        onError = h;
+      },
+    };
+
+    return {
+      socket,
+      sent,
+      subscriptionIds,
+      /** What a real WebSocket does on its way down: error, then close. */
+      dieWithErrorThenClose: () => {
+        onError(new Error('websocket error'));
+        onClose();
+      },
+      deliver: (signature: string, slot: number, wallet: string) =>
+        onMessage(
+          JSON.stringify({
+            params: {
+              subscription: subscriptionIds.get(wallet),
+              result: { context: { slot }, value: { signature, err: null } },
+            },
+          }),
+        ),
+    };
+  }
+
+  function faultHarness(history: SignatureEntry[], options: { hangFrom?: number } = {}) {
+    let clock = 1_700_000_000_000;
+    let connects = 0;
+    const sockets: Array<ReturnType<typeof faultSocket>> = [];
+    const { rpc, calls } = fakeRpc({ history });
+    const cursors = openCursorStore({ path: ':memory:' });
+
+    const stream = new WalletStream({
+      wallets: [WALLET],
+      rpc,
+      cursors,
+      connect: async () => {
+        connects += 1;
+        // A connect that never settles holds the stream in the disconnected
+        // state deterministically, which is the only way to observe what a
+        // heartbeat does while a reconnect is genuinely still outstanding.
+        if (options.hangFrom !== undefined && connects >= options.hangFrom) {
+          return new Promise<StreamSocket>(() => undefined);
+        }
+        const s = faultSocket(1_000 * connects);
+        sockets.push(s);
+        return s.socket;
+      },
+      now: () => clock,
+      sleep: async () => undefined,
+      random: () => 0,
+    });
+
+    const swaps: TrackedSwap[] = [];
+    const disconnected: Array<{ reason: string }> = [];
+    const reconnected: Array<{ attempt: number }> = [];
+    stream.on('swap', (swap: TrackedSwap) => swaps.push(swap));
+    stream.on('disconnected', (event: { reason: string }) => disconnected.push(event));
+    stream.on('reconnected', (event: { attempt: number }) => reconnected.push(event));
+    // `EventEmitter` throws an unhandled 'error' event, which would fail these
+    // tests for a reason that has nothing to do with what they assert.
+    stream.on('error', () => undefined);
+
+    return {
+      stream,
+      cursors,
+      swaps,
+      disconnected,
+      reconnected,
+      sockets,
+      calls,
+      get connects() {
+        return connects;
+      },
+      advance: (ms: number) => {
+        clock += ms;
+      },
+      close: () => cursors.close(),
+    };
+  }
+
+  it('tears down a socket that has gone silent past the timeout', async () => {
+    const h = faultHarness(entries(2));
+    try {
+      h.cursors.set(WALLET, 'sig-2', 102);
+      await h.stream.start();
+      expect(h.connects).toBe(1);
+
+      // Silent for longer than the timeout, with no error and no close: the
+      // failure mode nothing in this system could previously see.
+      h.advance(SILENCE_TIMEOUT_MS + 1_000);
+      const tornDown = h.stream.heartbeat(true);
+      await tick();
+
+      expect(tornDown).toBe(true);
+      expect(h.disconnected.some((d) => /silent/.test(d.reason))).toBe(true);
+      expect(h.connects).toBe(2);
+    } finally {
+      h.close();
+    }
+  });
+
+  it('does not tear down a socket inside the timeout', async () => {
+    const h = faultHarness(entries(2));
+    try {
+      h.cursors.set(WALLET, 'sig-2', 102);
+      await h.stream.start();
+
+      // The largest gap between live deliveries measured with the machine
+      // genuinely awake was 57.5s. A timeout that fires inside that would
+      // reconnect on a quiet market, forever.
+      h.advance(SILENCE_TIMEOUT_MS - 1_000);
+      expect(h.stream.heartbeat(true)).toBe(false);
+      await tick();
+
+      expect(h.disconnected).toHaveLength(0);
+      expect(h.connects).toBe(1);
+    } finally {
+      h.close();
+    }
+  });
+
+  it('reconnects and BACKFILLS the window the socket was down for', async () => {
+    // Newest first, as the RPC returns them.
+    const history: SignatureEntry[] = [
+      { signature: 'sig-5', slot: 105, err: null, transactionIndex: 0 },
+      { signature: 'sig-4', slot: 104, err: null, transactionIndex: 0 },
+      { signature: 'sig-3', slot: 103, err: null, transactionIndex: 0 },
+    ];
+    const h = faultHarness(history);
+    try {
+      h.cursors.set(WALLET, 'sig-3', 103);
+      await h.stream.start();
+      expect(h.swaps.map((s) => s.signature)).toEqual(['sig-4', 'sig-5']);
+
+      // Two transactions happen while the socket is down. The socket cannot
+      // deliver them; only the post-reconnect gap fill can.
+      history.unshift({ signature: 'sig-7', slot: 107, err: null, transactionIndex: 0 });
+      history.unshift({ signature: 'sig-6', slot: 106, err: null, transactionIndex: 0 });
+
+      h.sockets[0]!.dieWithErrorThenClose();
+      await tick(8);
+
+      expect(h.connects).toBe(2);
+      expect(h.reconnected).toHaveLength(1);
+      // Re-subscribed on the NEW socket, not the dead one.
+      expect(h.sockets[1]!.subscriptionIds.get(WALLET)).toBeDefined();
+      // The gap is filled: this is the assertion that separates "reconnected"
+      // from "reconnected and actually recovered the missed window".
+      expect(h.swaps.map((s) => s.signature)).toEqual(['sig-4', 'sig-5', 'sig-6', 'sig-7']);
+      expect(h.cursors.get(WALLET)?.lastSignature).toBe('sig-7');
+    } finally {
+      h.close();
+    }
+  });
+
+  it('treats one socket death as ONE reconnect, not one per event it emitted', async () => {
+    const h = faultHarness(entries(2));
+    try {
+      h.cursors.set(WALLET, 'sig-2', 102);
+      await h.stream.start();
+      expect(h.connects).toBe(1);
+
+      // A real WebSocket fires `error` and then `close`. Both used to reach
+      // `onDisconnect`, and each started its own reconnect chain — visible in
+      // session 23's session file as `websocket error` and `closed` one
+      // millisecond apart, and thereafter as reconnect attempts arriving in
+      // pairs for the rest of the run.
+      h.sockets[0]!.dieWithErrorThenClose();
+      await tick(8);
+
+      expect(h.connects).toBe(2);
+      expect(h.reconnected).toHaveLength(1);
+    } finally {
+      h.close();
+    }
+  });
+
+  it('does not start another reconnect for a heartbeat while already disconnected', async () => {
+    // The second connect never settles, so after the first teardown the stream
+    // stays genuinely disconnected with a reconnect outstanding.
+    const h = faultHarness(entries(2), { hangFrom: 2 });
+    try {
+      h.cursors.set(WALLET, 'sig-2', 102);
+      await h.stream.start();
+
+      h.advance(SILENCE_TIMEOUT_MS + 1_000);
+      expect(h.stream.heartbeat(true)).toBe(true);
+      await tick(8);
+      const afterFirst = h.connects;
+      const disconnectsAfterFirst = h.disconnected.length;
+
+      // `lastMessageAt` only moves on a delivered frame, so on a quiet feed
+      // every subsequent tick still looks silent. Without a guard each one
+      // starts another chain and they multiply for as long as the outage lasts.
+      for (let i = 0; i < 3; i += 1) {
+        h.advance(SILENCE_TIMEOUT_MS + 1_000);
+        expect(h.stream.heartbeat(true)).toBe(false);
+      }
+      await tick(8);
+
+      expect(h.connects).toBe(afterFirst);
+      expect(h.disconnected).toHaveLength(disconnectsAfterFirst);
     } finally {
       h.close();
     }

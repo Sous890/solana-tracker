@@ -14,7 +14,7 @@ simulate every fill while claiming not to. Do not create or load a keypair path.
 - `README.md` — layering, the control API, and the recorded decisions behind
   the integer money model, the orphan gate, and disk-not-chain reconciliation.
   It is current and detailed; do not re-derive it, and do not duplicate it here.
-- `docs/handoffs/` — one file per session, numbered. **`23-ledger-durability.md`
+- `docs/handoffs/` — one file per session, numbered. **`24-liveness-and-non-trades.md`
   is the most recent.** Read the latest two before starting. They record what
   was verified from code and the database versus what was recalled, which is the
   distinction that matters most in this repo.
@@ -26,7 +26,7 @@ Node 24 is keg-only Homebrew here, so it may need to be on `PATH`:
 
 | Command | What it does |
 | --- | --- |
-| `npm test` | Full vitest suite — currently **880 tests across 22 files** |
+| `npm test` | Full vitest suite — currently **900 tests across 22 files** |
 | `npx vitest run tests/soak.test.ts` | One test file |
 | `npx vitest run tests/soak.test.ts -t "SIGKILL"` | One test by name substring |
 | `npm run typecheck` | `tsc -p tsconfig.test.json` — types `src` **and** `tests` |
@@ -121,7 +121,8 @@ These are repeated in every session prompt. They are not style preferences.
 ## Known gaps
 
 Every item here biases the same direction: **toward making a wallet look more
-copyable than it is.** None is fixed.
+copyable than it is.** Items marked FIXED are kept because the mechanism cost a
+session to find and the wrong explanations are worth not re-deriving.
 
 ### 1. `fit_alpha_half_life` is misspecified for these wallets, not under-fed
 
@@ -293,35 +294,106 @@ difference is small while the recoverability difference is total. Note the
 recovered entry arrives minutes later and will be `STALE_SIGNAL`-rejected, so
 this is a **corpus-completeness** argument, not a trading one.
 
-### 11. The stream's liveness check is never called
+### 11. FIXED — the stream's liveness check is now driven
 
-`WalletStream.heartbeat()` is invoked from **nowhere** — not `tracker.ts`, not
-`serve.ts`, not `soak.ts`, not any test. `SILENCE_TIMEOUT_MS = 90_000` and the
-`missedHeartbeats >= 2` teardown are dead code.
+`WalletStream.heartbeat()` had no caller anywhere, so `SILENCE_TIMEOUT_MS` was
+dead and a socket that stopped delivering *without erroring* was undetectable.
+It now runs on its own scheduler interval (`HEARTBEAT_INTERVAL_MS`, 30s) beside
+the price and screen loops.
 
-Consequence, measured in session 23's soak: the socket stopped delivering at
-+48.9 min and nothing noticed for **21.6 minutes**, until the underlying TCP
-errored on its own. Then 23 `disconnected` events with **0 `reconnected`** — 21
-consecutive `errored before opening` — and the run spent its last 65 minutes
-receiving nothing while looking healthy. The soak reached 51 live-parsed swaps
-instead of 80 for this reason alone; over the ~49 minutes the socket was up the
-rate was ~63/hour, which is normal.
+**`healthy` is passed as `true` and that limb is still inert.** The
+`missedHeartbeats >= 2` path wants an independent liveness signal and this
+process has none that is free — anything that could contradict the socket is
+another network call, against a ~10 rps provider. The silence limb is the
+detector.
 
-A silent socket is the failure mode this bot can least afford, because every
-other counter keeps looking fine.
+Also fixed, both found while wiring it and both real:
 
-### 12. Six buy intents hung, and the entry gate is currently SHUT
+- **One socket death started two reconnect chains.** A real WebSocket emits
+  `error` then `close`; both reached `onDisconnect`, and `connect()` routed its
+  own failure back through it too, so live chains only ever accumulated.
+  `connectOnce()` now never starts a chain, `reconnect()` is a loop that owns
+  retrying, and `beginReconnect()` admits one at a time.
+- **A heartbeat during an outage would have multiplied chains.**
+  `lastMessageAt` only advances on a delivered frame, so every tick still looks
+  silent; `heartbeat()` now returns early when there is no socket.
 
-Session 23's soak left 6 `buy` intents `pending` — created 15:51–16:10 UTC, an
-hour before a clean shutdown, so this is not a shutdown race. `reconcileOnStartup`
-marked them `CRASH_ORPHAN`, and guard gate 0 refuses **every buy** while
-unacknowledged orphans exist.
+`SILENCE_TIMEOUT_MS` is **180s**, from the measured healthy-gap distribution with
+host sleep excluded (p50 2.6s, p90 14.8s, max 57.5s over 356 samples) — ~3.1x the
+worst healthy gap. The margin guards against a **reconnect storm** on a quiet
+market, not against a missed teardown.
 
-**Clear them before the next soak** (`npm run orphans`) or it will observe
-traffic and open nothing. The broker resolves its own failures and the guard
-layer resolves rejections, so an hour-old `pending` means something never
-settled — most likely a quote or screener call with no timeout during the
-`UPSTREAM_ERROR` window. Not diagnosed.
+### 11a. Session 23's soak ran on a sleeping laptop — always use `caffeinate`
+
+**The host slept for 84.9 of that soak's 113.9 minutes.** All three long
+"reconnect gaps" match `pmset` sleep windows to within seconds, and the session
+file stops one second after a sleep entry.
+
+Two numbers from handoff 23 are void: the "largest healthy gap was 4.5 minutes"
+(a sleep artifact — it is 57.5s) and "51 live-parsed swaps in 113.9 minutes"
+(measured across a window that was 75% suspended). The conclusion that the
+reconnect path is broken is **not established**; fault injection did not
+reproduce a failure.
+
+Run every soak under `caffeinate -dimsu`, and check `pmset -g log` before
+believing any long gap in a session file.
+
+### 12. FIXED — intents could be recorded and never resolved
+
+Guard gates 7 and 8 `await inner.getQuote()` and `inner.canSell()` with **no
+`try`**, so a quote outage throws a `QuoteUnavailableError` — not a
+`GuardRejection` — out of `guarded().execute` *before the inner broker runs*. The
+broker resolves its own failures but was never reached; the guard layer resolves
+its own rejections but this was not one; the tracker only logged it. The row
+stayed `pending` for ever and became a `CRASH_ORPHAN` that shut gate 0.
+
+Timing from the session file: first `UPSTREAM_ERROR` quote at 15:51:36.011, first
+unresolvable intent at 15:51:50.911 — 14.9s later. Quote errors went 5.9% → 70.3%
+across that boundary, and **all 8 fills are intents <=00014 while all 6 orphans
+are >=00015.** A state transition, not a race.
+
+The tracker now resolves any non-`GuardRejection` failure as `failed`, but only
+when the status is still `pending`, so a resolution the broker already made is
+never relabelled. Gates 7 and 8 themselves are unchanged.
+
+### 13. Not every token movement is a trade — `INFRASTRUCTURE_ONLY`
+
+Confirmed against chain in session 24. Transactions whose SOL leg was exactly
+`SPL_TOKEN_ACCOUNT_RENT_LAMPORTS` invoke **no venue program at all** — only ATA,
+token, system and compute budget. They are create-an-ATA-and-send-tokens.
+
+The balance evidence is worse than a wrong label: on the buy side the tracked
+wallet's own lamport delta is **0** (the sender paid the rent), and on the sell
+side it is **-2,245,780** — the parser recorded SOL arriving while the wallet was
+paying it out. 271 across the corpus, split 138 buys / 133 sells; an ATA opening
+pays rent and a closing refunds it, which is why the split is near-even.
+
+`parseSwap` now returns `INFRASTRUCTURE_ONLY` when **every program invoked** is
+infrastructure. This is a **denylist, not an allowlist** — requiring a known
+venue would repeat handoff 20's disproved mistake and discard every new DEX,
+whereas "no market was touched by anyone" is safe under any venue. It reads
+instructions rather than account keys, and **fails open** when the encoding does
+not say what ran.
+
+It matters because `mirror.ts` sizes from `positionSizeSol`, not from the
+observed swap: a 0.002 SOL transfer and a 5 SOL buy produced the same entry.
+
+### 14. Telemetry that named the wrong thing — all three fixed
+
+- **`queue-overflow` reported the arriving wallet, not the one that lost
+  entries.** The queue is global and `splice(0, n)` drops the oldest. **Every
+  shed-by-wallet figure in this repo's history is void**, including handoff 23's
+  "26 of 37 sheds belong to `BCagckXe…`". The field is now `arrivingWallet`, and
+  `droppedFor` / `droppedSignatures` carry the real answer. Shed *timing*
+  findings still stand — they never used the wallet field.
+- **Guard rejections now reach session files** as a new `decision` kind, carrying
+  `signalAgeMs`. It is a distinct kind rather than an `unmodeled` tag because the
+  unmodeled count is a falsifiability signal and must not be diluted; the replay
+  loader carries it and drives nothing from it, so "inputs only" still holds.
+  **This closes gap 8** in the only way available without a ledger sign-off.
+- **`PAPER BALANCE DRIFT` compared a per-process counter to a cumulative
+  ledger**, so it fired on every healthy run against a non-empty file. The digest
+  now latches the opening flow and compares delta to delta.
 
 ## Environment traps
 

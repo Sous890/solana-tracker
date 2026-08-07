@@ -5,7 +5,9 @@ import { describe, expect, it } from 'vitest';
 import {
   WSOL_MINT,
   accountKeyList,
+  isInfrastructureOnly,
   parseSwap,
+  programsInvoked,
   tokenDeltasForOwner,
   venuesPresent,
 } from '../src/adapters/swapParser.js';
@@ -499,5 +501,100 @@ describe('stamping', () => {
     const { source: _s1, observedAt: _o1, ...bareRest } = bare.swap;
     const { source: _s2, observedAt: _o2, ...stampedRest } = stamped.swap;
     expect(stampedRest).toEqual(bareRest);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Token movement that is not a trade
+// ---------------------------------------------------------------------------
+
+/**
+ * 271 transactions across the corpus — 5.3-5.6% of everything this parser called
+ * a swap — had a SOL leg of exactly `SPL_TOKEN_ACCOUNT_RENT_LAMPORTS`, split
+ * 138 buys to 133 sells. Session 24 fetched six of them and they are not trades:
+ * every program that ran was ATA, token or system, and the balance evidence is
+ * worse than "mislabelled".
+ *
+ * On the buy side the tracked wallet's own lamport delta was **zero** — the rent
+ * was paid by whoever sent the tokens. On the sell side it was **-2,245,780**,
+ * so the parser recorded 2,039,280 lamports arriving while the wallet was
+ * paying that much out. The SOL direction was inverted, not merely spurious.
+ *
+ * `mirror.ts` sizes from `positionSizeSol` and not from the observed swap, so a
+ * 0.002 SOL token transfer and a 5 SOL buy produced the same 0.05 SOL entry.
+ */
+describe('infrastructure-only transactions', () => {
+  it('refuses a real ATA-create-and-transfer, with a countable reason', () => {
+    const capture = real('ata-transfer-buy-side');
+    const result = parseSwap(capture.tx, capture.wallet!, {
+      source: 'gapfill',
+      observedAt: 0,
+    });
+
+    expect(result.kind).toBe('unparsed');
+    expect((result as { reason: string }).reason).toBe('INFRASTRUCTURE_ONLY');
+  });
+
+  it('identifies the programs that actually ran, not the account keys', () => {
+    const capture = real('ata-transfer-buy-side');
+    const keys = accountKeyList(capture.tx)!;
+    const programs = programsInvoked(capture.tx, keys);
+
+    expect(programs.size).toBeGreaterThan(0);
+    // Every one is infrastructure — which is the whole claim.
+    expect(isInfrastructureOnly(programs)).toBe(true);
+    // And strictly fewer than the key list, because most keys are not programs.
+    expect(programs.size).toBeLessThan(keys.length);
+  });
+
+  /**
+   * The guard that matters more than the filter. A predicate that quietly ate
+   * real trades would be worse than the problem it was added for.
+   */
+  it('still parses every real venue capture as a swap', () => {
+    const venueCaptures = [
+      'raydium-v4-buy',
+      'raydium-clmm-buy',
+      'pumpfun-sell',
+      'meteora-dlmm-buy',
+      'whirlpool-buy',
+    ] as const;
+
+    for (const name of venueCaptures) {
+      const capture = real(name);
+      const result = parseSwap(capture.tx, capture.wallet!, {
+        source: 'gapfill',
+        observedAt: 0,
+      });
+      expect(result.kind, `${name} must still parse as a swap`).toBe('swap');
+    }
+  });
+
+  it('fails OPEN when the encoding does not say what ran', () => {
+    // No instructions at all: the parser cannot tell, and a discarded real trade
+    // is silent while an admitted transfer is counted. So it must not filter.
+    expect(isInfrastructureOnly(new Set())).toBe(false);
+  });
+
+  it('does not filter when a venue program ran alongside infrastructure', () => {
+    const mixed = new Set([
+      '11111111111111111111111111111111',
+      'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA',
+      '675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8',
+    ]);
+    expect(isInfrastructureOnly(mixed)).toBe(false);
+  });
+
+  /**
+   * An unknown DEX must survive. This is the shape handoff 20 got wrong by
+   * blaming unrecognised program ids, and the reason this is a denylist.
+   */
+  it('does not filter an unrecognised venue program', () => {
+    const unknownDex = new Set([
+      '11111111111111111111111111111111',
+      'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA',
+      'SomeDexNobodyHasAddedYet111111111111111111',
+    ]);
+    expect(isInfrastructureOnly(unknownDex)).toBe(false);
   });
 });

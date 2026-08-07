@@ -58,6 +58,33 @@ export const VENUE_PROGRAMS: ReadonlyArray<readonly [SwapVenue, Address]> = [
   ['meteora-dlmm', 'LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo'],
 ];
 
+/**
+ * Programs that move tokens but are not a market.
+ *
+ * ── WHY THIS IS A DENYLIST AND NOT AN ALLOWLIST ───────────────────────────
+ *
+ * Handoff 20 blamed unrecognised venue program ids for the missing swaps and
+ * was disproved: this parser works from balance deltas precisely so a venue it
+ * has never heard of still produces a swap, and `venue: 'unknown'` is metadata
+ * rather than a verdict. Requiring a *known* venue would repeat that mistake and
+ * discard every DEX nobody has added yet.
+ *
+ * Asking the opposite question is safe. If the only programs that ran are these
+ * — system, the token programs, the associated-token-account program, compute
+ * budget, memo — then no market was touched by anyone, under any venue, known or
+ * not. A new DEX cannot look like this, because a new DEX is a program and would
+ * be in the invoked set and absent from this list.
+ */
+export const INFRASTRUCTURE_PROGRAMS: ReadonlySet<string> = new Set([
+  '11111111111111111111111111111111', // System
+  'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA', // SPL Token
+  'TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb', // Token-2022
+  'ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL', // Associated Token Account
+  'ComputeBudget111111111111111111111111111111', // Compute budget
+  'MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr', // Memo v2
+  'Memo1UhkJRfHyvLMcVucJwxXeuD728EqVDDwQDxFMNo', // Memo v1
+]);
+
 /** Above this relative gap, path 1 and path 2 disagreeing is worth shouting about. */
 const PATH_DISAGREEMENT_TOLERANCE = 0.005;
 
@@ -123,7 +150,18 @@ export type UnparsedCode =
   | 'NO_MINT_DELTA'
   | 'MULTI_MINT_DELTA'
   | 'NO_SOL_LEG'
-  | 'WALLET_NOT_IN_TX';
+  | 'WALLET_NOT_IN_TX'
+  /**
+   * Tokens moved, but no market was involved — every program that ran was
+   * infrastructure. A wallet-to-wallet transfer, an airdrop, a distribution.
+   *
+   * Counted rather than dropped, because "how many of these are there" is the
+   * question that made them worth filtering: 271 across the corpus, 5.3-5.6% of
+   * everything the parser called a swap, and `mirror.ts` sizes from
+   * `positionSizeSol` rather than from the observed trade — so each one was a
+   * full-weight entry signal on a token transfer.
+   */
+  | 'INFRASTRUCTURE_ONLY';
 
 /** Which rule produced `solAmount`. Recorded for debugging, not for logic. */
 export type SolAmountPath = 'wsol-token-delta' | 'lamport-delta';
@@ -300,6 +338,61 @@ export function venuesPresent(keys: readonly string[]): SwapVenue[] {
   return VENUE_PROGRAMS.filter(([, program]) => present.has(program)).map(([venue]) => venue);
 }
 
+/**
+ * Every program actually invoked, top-level and inner.
+ *
+ * Deliberately NOT the account key list. A venue's program id sits in the keys
+ * of any transaction that merely references it, and — more to the point here —
+ * the keys of an ATA transfer contain mints and token accounts that are not
+ * programs at all. Only the instructions say what ran.
+ *
+ * Both encodings, for the same reason `accountKeyList` handles both: `jsonParsed`
+ * gives `programId` directly, and the raw encoding gives an index into the keys.
+ * Returns an empty set when neither is present, and every caller treats that as
+ * "cannot tell" rather than as "nothing ran".
+ */
+export function programsInvoked(
+  tx: ParsedTransactionWithMeta,
+  keys: readonly string[],
+): Set<string> {
+  const programs = new Set<string>();
+  const add = (instruction: unknown): void => {
+    const record = instruction as { programId?: unknown; programIdIndex?: unknown };
+    if (typeof record.programId === 'string') {
+      programs.add(record.programId);
+      return;
+    }
+    if (typeof record.programIdIndex === 'number') {
+      const key = keys[record.programIdIndex];
+      if (key !== undefined) programs.add(key);
+    }
+  };
+
+  const message = (tx as { transaction?: { message?: { instructions?: unknown[] } } }).transaction
+    ?.message;
+  for (const instruction of message?.instructions ?? []) add(instruction);
+
+  const inner =
+    (tx.meta as { innerInstructions?: Array<{ instructions?: unknown[] }> } | null)
+      ?.innerInstructions ?? [];
+  for (const group of inner) for (const instruction of group.instructions ?? []) add(instruction);
+
+  return programs;
+}
+
+/**
+ * True when every program that ran is infrastructure — so nothing traded.
+ *
+ * **Fails open.** An empty set means the encoding did not tell us what ran, and
+ * a real trade wrongly discarded is far more expensive than a token transfer
+ * wrongly admitted: the first is silent, the second is counted.
+ */
+export function isInfrastructureOnly(programs: ReadonlySet<string>): boolean {
+  if (programs.size === 0) return false;
+  for (const program of programs) if (!INFRASTRUCTURE_PROGRAMS.has(program)) return false;
+  return true;
+}
+
 // ---------------------------------------------------------------------------
 // parseSwap
 // ---------------------------------------------------------------------------
@@ -353,6 +446,25 @@ export function parseSwap(
       signature,
       reason: 'WALLET_NOT_IN_TX',
       detail: 'account key list does not match preBalances length',
+    };
+  }
+
+  // Tokens can move without a market. Checked after the wallet is known to be
+  // in the transaction — "not here at all" is the more basic fact — and before
+  // the delta analysis, which cannot tell a transfer from a trade because both
+  // move exactly one mint.
+  //
+  // Confirmed against chain in session 24: six sampled transactions whose SOL
+  // leg was exactly `SPL_TOKEN_ACCOUNT_RENT_LAMPORTS` ran only ATA, token and
+  // system programs. On the buy side the wallet's own lamport delta was **0** —
+  // the rent was paid by the sender — and on the sell side it was **-2,245,780**,
+  // so the parser recorded SOL coming in while the wallet was paying it out.
+  if (isInfrastructureOnly(programsInvoked(tx, keys))) {
+    return {
+      kind: 'unparsed',
+      signature,
+      reason: 'INFRASTRUCTURE_ONLY',
+      detail: 'tokens moved but no venue program ran',
     };
   }
 

@@ -141,16 +141,37 @@ describe('record mode', () => {
     const { lines, dir } = await recorded((recorder) => {
       recorder.attach(tracker as never);
       tracker.emit('event', { type: 'swap-detected', data: swapOf() });
-      // Recognised OUTPUTS are skipped by name; a session holds inputs.
+      // Recognised OUTPUTS a replay regenerates are still skipped by name.
       tracker.emit('event', { type: 'fill', data: {} });
-      tracker.emit('event', { type: 'rejection', data: {} });
+      tracker.emit('event', { type: 'intent-created', data: {} });
+      // A refusal is now RECORDED, as its own `decision` kind. Session 23 could
+      // not tell a STALE_SIGNAL rejection from a signal the strategy ignored,
+      // because gate 3 runs before the first quote and nothing else survived it.
+      // A decision line is carried by the replay loader and drives nothing, so
+      // the self-agreement argument that excludes fills still holds.
+      tracker.emit('event', {
+        type: 'rejection',
+        data: {
+          intentId: 'intent-1',
+          side: 'buy',
+          mint: MINT_A,
+          code: 'STALE_SIGNAL',
+          rejectionCode: 'STALE_SIGNAL',
+          reason: 'originating swap is 20000ms old',
+          signalAgeMs: 20_000,
+        },
+      });
       // Anything the schema does not know becomes `unmodeled`, never nothing.
       tracker.emit('event', { type: 'something-new', data: { a: 1 } });
     });
     try {
-      expect(lines).toHaveLength(2);
+      expect(lines).toHaveLength(3);
       expect(lines[0]!['kind']).toBe('swap');
       expect(lines[1]).toMatchObject({
+        kind: 'decision',
+        payload: { code: 'STALE_SIGNAL', intentId: 'intent-1', signalAgeMs: 20_000 },
+      });
+      expect(lines[2]).toMatchObject({
         kind: 'unmodeled',
         payload: { tag: 'tracker:something-new', raw: { a: 1 } },
       });
