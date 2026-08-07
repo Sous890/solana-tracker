@@ -46,6 +46,14 @@ export interface SoakSnapshot {
    */
   unparsedByReason: Tally;
   unparsedTotal: number;
+  /**
+   * Token movements refused because no venue program ran — `INFRASTRUCTURE_ONLY`.
+   *
+   * Excluded from `unparsedShareBps`, which is an alarm about the parser meeting
+   * something it cannot handle. These are transactions it handled correctly by
+   * declining them.
+   */
+  filteredNonTrades: number;
   /** Unparsed as a share of tracked swaps, in integer basis points. */
   unparsedShareBps: number;
 
@@ -309,7 +317,21 @@ export class SoakDigest {
     for (const [mint, count] of [...this.noRoute].sort()) {
       findings.push(`NO_ROUTE while holding ${mint} (${count}x) — needs an explanation`);
     }
-    const shareBps = bps(unparsedTotal, trackedTotal + unparsedTotal);
+    // `INFRASTRUCTURE_ONLY` is a CLASSIFICATION, not a failure to parse.
+    //
+    // The >1% threshold was set when every unparsed transaction meant the
+    // parser had met something it could not handle. Since session 24 the parser
+    // deliberately refuses token movements that no venue program touched — and
+    // those are the majority of tracked traffic on these wallets, so leaving
+    // them in the ratio makes this finding fire on every healthy run. That is
+    // the same defect as the paper-drift check above, introduced by the same
+    // session that fixed it, and it trains people to ignore findings.
+    //
+    // Counted and reported separately, so the number is not lost: a sudden move
+    // in the filtered share is still worth seeing, it just is not this alarm.
+    const filteredTotal = this.unparsed.get('INFRASTRUCTURE_ONLY') ?? 0;
+    const unparsedFailures = unparsedTotal - filteredTotal;
+    const shareBps = bps(unparsedFailures, trackedTotal + unparsedFailures);
     if (shareBps > 100) {
       findings.push(
         `unparsed transactions are ${(shareBps / 100).toFixed(2)}% of tracked traffic (>1%)`,
@@ -323,6 +345,7 @@ export class SoakDigest {
       unparsedByReason: sorted(this.unparsed),
       unparsedTotal,
       unparsedShareBps: shareBps,
+      filteredNonTrades: filteredTotal,
       unmodeledByTag: sorted(this.unmodeled),
       unmodeledTotal: recorder.unmodeled,
       guardRejectionsByCode: sorted(this.rejections),

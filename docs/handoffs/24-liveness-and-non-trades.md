@@ -42,6 +42,12 @@ with no `try`. I put the backstop in the tracker instead — see Task B for why
 that is the right layer — but the guard layer's own exception behaviour is
 unchanged and could still surprise a future caller.
 
+**I introduced a defect and caught it at the very end.** Task C's filter made the
+soak digest's "unparsed >1%" alarm fire on a healthy run — the same
+warning-that-cries-wolf shape Task D.3 existed to remove. Fixed, but it was live
+for the whole soak and I only saw it because the restart printed a digest. Details
+under Task E.
+
 ---
 
 ## The correction that reframes session 23
@@ -439,9 +445,141 @@ obvious shape of a fix is to connect the socket **first** and gap-fill behind it
 which is safe because the seen set already dedupes the overlap — but that
 reorders `start()` and deserves its own session and its own tests.
 
-## Task E — soak
+## Task E — soak, with a real disconnect injected
 
-See the appended results section.
+`sessions/20260807T025234Z-000.jsonl`, started 02:52:34 UTC, under
+`caffeinate -dimsu`. Reconciled **2 open positions, 0 orphaned** on boot — the
+restart-with-open-positions regression passes on this run's own startup.
+
+### The injection, and what it proved
+
+WiFi was taken down at the interface (`networksetup -setairportpower en0 off`),
+held for 5 minutes against macOS's auto-re-enable, then restored.
+
+| | |
+| --- | --- |
+| WiFi down | 03:21:19 |
+| socket reports `websocket error` | **03:22:14.637** — one event, not a pair |
+| connect retries while the interface is down | **19**, all `errored before opening` |
+| longest gap between retries | **25.9 s** — inside `BACKOFF_MAX_MS` (30 s) |
+| WiFi restored | 03:26:19 |
+| gap fill runs for all 13 wallets | 03:26:35 → 03:26:44 |
+| `reconnected`, attempt 20 | **03:26:44.366** — 25 s after the interface returned |
+| signatures backfilled | **35** (H8sMJSCQ 30, CT9dekyf 2, AgiGpUAF 1, C86oRMyU 1, BCagckXe 1) |
+
+**Detection → reconnect → backfill, confirmed under live conditions.** And two
+things fall out of it that bear directly on this brief's premise:
+
+- **One socket death produced exactly one `disconnected` event.** Session 23's
+  file shows `websocket error` and `closed` a millisecond apart; this run shows a
+  single event. The double-chain fix, live.
+- **Every retry gap is under 30 s**, across a genuine 4.5-minute outage. Session
+  23's 1037 s and 969 s gaps could never have come from this loop, which is what
+  the sleep log independently established. **The reconnect path is not broken**,
+  and 20 attempts against a down interface followed by immediate success is what
+  a working one looks like.
+
+### The silence detector did NOT fire, and that is worth stating plainly
+
+The first disconnect reason is `websocket error`, not `silent for …ms`. Taking
+the interface down makes the socket **error**, which the pre-existing path
+already handled. So the live injection exercised reconnect and backfill, and did
+**not** exercise the silence limb.
+
+The silence limb covers a socket that goes quiet *without* erroring. It is
+covered deterministically by fault-injection tests — but **this repo has never
+observed that failure in the wild.** The one apparent instance, session 23's 21.6
+minutes of undetected silence, was the host asleep. So the detector is defensible
+insurance against a real failure mode of long-lived WebSockets, and it is not
+responding to anything measured here. That is a weaker claim than "we fixed the
+outage", and it is the accurate one.
+
+An unplanned bonus check: an earlier, shorter WiFi blip produced a **55.2 s**
+feed gap and the detector correctly did not tear down. 55.2 s against the 57.5 s
+worst healthy gap the threshold was derived from — a false-positive test on live
+data, by accident.
+
+### Task B's fix, validated by the outage it was built for
+
+The outage took the quote provider with it, which is the exact condition that
+stranded six intents in session 23.
+
+| | session 23 | this run |
+| --- | --- | --- |
+| intents hitting the quote-failure path | 6 | **14** |
+| left `pending` | 6 | **0** |
+| became `CRASH_ORPHAN` | 6 | **0** |
+| entry gate after | **shut** | open |
+
+All 14 resolved `failed / QuoteUnavailableError`. This is the fix reproducing the
+original conditions and surviving them, rather than a unit test asserting it.
+
+### Decision records, live
+
+Two `decision` lines written, both `STALE_SIGNAL`, carrying **`signalAgeMs`
+31,489 and 22,229** — the ages guard gate 3 actually judged. Both fired on
+gap-filled swaps immediately after a recovery, which is the correct outcome and
+was previously invisible: session 23 could not distinguish these from swaps the
+strategy ignored.
+
+That is CLAUDE.md gap 8 answered from a session file, without touching
+`db/ledger.ts`.
+
+### The five baselines
+
+**Gate met: 98 live-parsed swaps in 65.8 minutes** (89.4/hour), against 80.
+
+| measure | session 22 | session 23 | this session |
+| --- | --- | --- | --- |
+| live-sourced `WALLET_NOT_IN_TX` | 0 | 0 | **0 — held** |
+| detection leg, live | p50 171 / p90 272 / p99 364, max 652 | p50 171 / p90 278 / p99 369 | **p50 191 / p90 275 / p99 400, max 549** (n=488) |
+| null window | 1 in 500 | 1 in 368 | **5 in 488**, 0 unresolved |
+| sheds | 37 in 64.3 min | 25 in 113.9 min | **0 in 65.8 min** |
+| multi-wallet transactions | not counted | 1 | **0** (slot multiplier 1.0000 over 3,698) |
+| reconnect successes / attempts | — | — | **1 / 20** |
+| silence-detector firings | — | — | **0** (see above) |
+| filtered non-trades | — | — | **3,494** (323 live, 3,171 gapfill) |
+| orphaned intents at shutdown | 6 | 6 | **0 — target met** |
+
+**The null-window rate is up (1.0% vs 0.2%) and that is the injection, not a
+regression.** Five retries in a run that had its network taken away for 4.5
+minutes is what a retry budget is for; all five resolved and none was lost.
+
+**Zero sheds.** Not because the cap changed — it did not — but because no wallet
+produced a burst above 20 during this window. The shed pathology is bursty and
+absent from any given hour, which is consistent with the diagnosis and is why the
+cap decision is written down rather than acted on.
+
+### Restart with open positions — passes
+
+| | |
+| --- | --- |
+| open positions before stop | 2 (`3taE4SdY…` 17,247,021,917 / `3SCBYq9k…` 43,254,880,228) |
+| pending intents at stop | **0** |
+| unacknowledged orphans at stop | **0** |
+| shutdown snapshot | `integrity_check: ok`, both positions present at identical sizes |
+| final digest drift | **0** — on the same ledger that reported −106,789,862 before the fix |
+| restart | `openPositions: 2, recovered: 0, orphaned: 0` |
+
+No operator intervention was needed between stop and restart, which was the point
+of Task B.
+
+### A defect I introduced, caught by the restart
+
+The final digest's one remaining finding was **"unparsed transactions are 97.05%
+of tracked traffic (>1%)"**.
+
+That threshold was set when every unparsed transaction meant the parser had met
+something it could not handle. `INFRASTRUCTURE_ONLY` is a *classification*, not a
+failure — and on these wallets it is the majority of traffic — so my own Task C
+change made this alarm fire on a completely healthy run. **That is exactly the
+defect I was fixing in Task D.3, reintroduced by Task C in the same session.**
+
+Fixed: filtered non-trades are excluded from `unparsedShareBps` and reported
+separately as `filteredNonTrades`, so the number is not lost and the alarm means
+something again. The standing rule about checking whether another counter
+measures the same thing wrongly applies to counters you create, and I only caught
+this because the restart printed a digest.
 
 ---
 
@@ -473,3 +611,26 @@ soak that ran *with* the filter, so it counts what was filtered. The 271 figure
 from earlier sessions is a `solAmount === 2039280` proxy on unfiltered data and
 is a **lower bound** — it cannot see an infrastructure-only transfer whose rent
 was a different size, e.g. a Token-2022 account or two ATAs in one transaction.
+
+
+---
+
+## What the next session should do first
+
+1. **Connect the socket before gap-filling, not after.** The bot is blind to live
+   traffic for the whole startup backlog — 11.5 minutes this run, unbounded in
+   principle, and it scales with downtime. The seen set already dedupes the
+   overlap, so this is a reordering rather than a redesign, but it changes
+   `start()` and needs its own tests.
+2. **`MAX_IN_FLIGHT` to 256**, with the reasoning above and a cursor-monotonicity
+   test under out-of-order arrival. Then consider round-robin drain, which is the
+   actual fix for one wallet's burst delaying twelve others.
+3. **Wrap gates 7 and 8** so the guard layer resolves its own exceptions rather
+   than relying on the tracker's backstop. Defence in depth for the Task B leak.
+4. **Decide whether the silence detector earns its keep.** It is insurance
+   against a failure this repo has never observed — the one apparent case was the
+   host asleep. Keep it, but do not let its existence imply the outage it was
+   built for was real.
+5. `signal_age_ms` on `intents` — now *partly* answered by `decision` lines, so
+   the ledger column is less urgent than it was. Reassess before spending a
+   sign-off on it.
