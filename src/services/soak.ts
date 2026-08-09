@@ -113,6 +113,9 @@ const UNHANDLED_BASIS =
  * 1,000, and a number with false precision invites someone to trust it further
  * than the measurement supports.
  */
+/** Mirrors `MAX_DEFERRED` in `db/cursors.ts`, for the printed line only. */
+const MAX_DEFERRED_REPORTED = 4_096;
+
 const DEATH_DEDUPE_MS = 1_000;
 const DEATH_DEDUPE_BASIS =
   'pairs max 34ms (n=56) vs closest distinct deaths 9,946ms (n=35), 11 sessions to 2026-08-07';
@@ -206,6 +209,12 @@ export interface SoakSnapshot {
     gapFills: number;
     signaturesRecovered: number;
     truncatedGapFills: number;
+    /**
+     * Cursor-barrier peaks. `heldNow` must be 0 in a final digest — a wallet
+     * still held at exit is a leaked barrier, which freezes that cursor
+     * silently.
+     */
+    barrier: { peakDeferred: number; peakOutstanding: number; heldNow: number };
   };
 
   quotes: {
@@ -267,6 +276,8 @@ export interface SoakDigestOptions {
   };
   /** Jupiter's cache counters, when the adapter exposes them. */
   quoteCacheStats?: () => { hits: number; misses: number };
+  /** Cursor-barrier bookkeeping, so a soak reports its peak rather than guessing. */
+  barrierStats?: () => { peakDeferred: number; peakOutstanding: number; heldNow: number };
 }
 
 export class SoakDigest {
@@ -532,6 +543,11 @@ export class SoakDigest {
         gapFills: this.gapFills,
         signaturesRecovered: this.signaturesRecovered,
         truncatedGapFills: this.truncatedGapFills,
+        barrier: this.options.barrierStats?.() ?? {
+          peakDeferred: 0,
+          peakOutstanding: 0,
+          heldNow: 0,
+        },
       },
       quotes: {
         byError: sorted(this.quoteErrors),
@@ -602,7 +618,9 @@ export function formatDigest(snapshot: SoakSnapshot): string {
         `(${snapshot.stream.connectAttemptFailures} failed attempts, ` +
         `${snapshot.stream.deathEchoesCollapsed} echoes collapsed at ${DEATH_DEDUPE_MS}ms; ${DEATH_DEDUPE_BASIS}), ` +
         `reconnect p50 ${snapshot.stream.reconnectLatencyMs.p50}ms max ${snapshot.stream.reconnectLatencyMs.max}ms, ` +
-        `${snapshot.stream.gapFills} gap fills recovering ${snapshot.stream.signaturesRecovered} sigs`,
+        `${snapshot.stream.gapFills} gap fills recovering ${snapshot.stream.signaturesRecovered} sigs, ` +
+        `barrier peak deferred ${snapshot.stream.barrier.peakDeferred}/${MAX_DEFERRED_REPORTED} ` +
+        `outstanding ${snapshot.stream.barrier.peakOutstanding} held-now ${snapshot.stream.barrier.heldNow}`,
     ],
     [
       'quotes',

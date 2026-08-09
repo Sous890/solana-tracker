@@ -26,6 +26,20 @@ CREATE TABLE IF NOT EXISTS wallet_cursors (
 );
 `;
 
+/**
+ * Ceiling on completed-but-not-yet-persistable positions held per wallet.
+ *
+ * Unbounded, this grew with the length of a gap fill: every completed entry
+ * behind an outstanding predecessor stays in memory until the barrier lifts.
+ * The largest single gap fill on record is **3,142 entries** (H8sMJS in
+ * `20260807T025234Z-000`), so 4,096 is the next power of two above the worst
+ * case actually observed — the bound is a backstop against a pathological
+ * replay, not a limit the normal path is expected to reach.
+ *
+ * Hitting it is not a data-loss event. See the drop policy in `set`.
+ */
+const MAX_DEFERRED = 4_096;
+
 export interface WalletCursor {
   wallet: Address;
   lastSignature: Signature;
@@ -38,34 +52,45 @@ export interface CursorStore {
   /** Record the last emitted signature. Call after emitting, not on receipt. */
   set(wallet: Address, signature: Signature, slot: number, at?: UnixMillis): void;
   /**
-   * Declare that work is outstanding for this wallet, so `set` cannot persist a
-   * position whose predecessors are still unhandled.
+   * Take the barrier for this wallet: nothing advances until `release`.
    *
-   * With no slots, nothing advances until `release` — used before a gap fill has
-   * paged its history and can say what it is about to replay. With slots, only
-   * positions below the lowest outstanding one may persist, so a long replay
-   * still records progress as it goes.
+   * **THROWS if the wallet is already held**, and that is the point. The barrier
+   * is not reentrant and two wallet loops running at once would defeat it
+   * silently — `release` drops it outright, so whichever loop finishes a wallet
+   * first removes the other's protection, and the surviving loop's remaining
+   * entries stop holding anything back. Silent defeat of a data-loss guard is
+   * exactly the failure that should not wait to be discovered in a soak.
    *
-   * Idempotent, and a second call replaces the first: `hold(w)` then
-   * `hold(w, slots)` is the intended sequence.
-   *
-   * NOT REENTRANT, and this is a precondition rather than an oversight. Two
-   * wallet loops running at once would defeat it silently: `release` deletes the
-   * barrier outright, so the first loop to finish a wallet drops the second
-   * loop's protection, and `hold(w, slots)` replaces the outstanding set instead
-   * of unioning with it, so the first loop's remaining entries stop holding
-   * anything back. Only one `gapFillAll` may be in flight.
-   *
-   * That holds today: `reconnect()` is guarded by `reconnecting`, and `start()`
-   * finishes its loop before a socket exists. It did NOT hold before the
-   * chain-splitting fix of 2026-08-06 (b1b02ea), which is where the doubled
-   * `gap-filled` events in the 2026-08-05 sessions come from. Anything that
-   * reintroduces concurrent loops — the queued round-robin change is the
-   * obvious candidate — has to make this counted first.
+   * Single-chain holds today: `reconnect()` is guarded by `reconnecting`, and
+   * `start()` finishes its loop before a socket exists. It did NOT hold before
+   * the chain-splitting fix of 2026-08-06 (b1b02ea), which is where the doubled
+   * `gap-filled` events in the 2026-08-05 sessions come from. The queued
+   * round-robin change has to make this counted before it runs loops
+   * concurrently, and this throw is what will tell it so.
    */
-  hold(wallet: Address, slots?: readonly number[]): void;
-  /** Everything outstanding for this wallet is handled or abandoned. */
+  hold(wallet: Address): void;
+  /**
+   * Narrow an existing hold to exactly the positions about to be handled.
+   *
+   * Separate from `hold` so that "take the barrier" and "say what is behind it"
+   * are different operations: taking twice is a bug, narrowing repeatedly is
+   * not. Until this is called nothing advances at all, because nothing knows
+   * what is outstanding; after it, only positions with an unhandled predecessor
+   * are held back, so a long replay records progress as it goes.
+   *
+   * Throws if the wallet is not held — narrowing something nobody took is the
+   * same class of mistake.
+   */
+  reserve(wallet: Address, slots: readonly number[]): void;
+  /**
+   * Everything outstanding for this wallet is handled or abandoned.
+   *
+   * Idempotent, deliberately: it is called from a `finally` that sweeps every
+   * wallet, including ones already released in the loop body.
+   */
   release(wallet: Address): void;
+  /** Barrier bookkeeping, for a soak to report rather than guess. */
+  barrierStats(): { peakDeferred: number; peakOutstanding: number; heldNow: number };
   all(): WalletCursor[];
   close(): void;
 }
@@ -129,6 +154,8 @@ export function openCursorStore(options: { path: string }): CursorStore {
     deferred: Array<{ signature: Signature; slot: number; at: UnixMillis }>;
   }
   const barriers = new Map<Address, Barrier>();
+  let peakDeferred = 0;
+  let peakOutstanding = 0;
 
   const persist = (wallet: Address, signature: Signature, slot: number, at: UnixMillis): void => {
     statements.upsert.run(wallet, signature, slot, at);
@@ -193,24 +220,41 @@ export function openCursorStore(options: { path: string }): CursorStore {
       // held back rather than advanced. Wrong in the safe direction.
       barrier.outstanding.delete(slot);
       barrier.deferred.push({ signature, slot, at });
-      flush(wallet);
-    },
-    hold(wallet, slots) {
-      const barrier = barriers.get(wallet) ?? {
-        blocked: true,
-        outstanding: new Set<number>(),
-        deferred: [],
-      };
-      if (slots === undefined) {
-        barrier.blocked = true;
-        barrier.outstanding.clear();
-      } else {
-        barrier.blocked = false;
-        barrier.outstanding = new Set(slots);
+
+      // Bounded, dropping the LOWEST slots. Only the highest eligible position
+      // is ever persisted, so a dropped low one costs nothing but the ability to
+      // name it — the cursor simply stays further back, which re-delivers. The
+      // opposite policy would throw away the position most likely to be the one
+      // persisted next.
+      if (barrier.deferred.length > MAX_DEFERRED) {
+        barrier.deferred.sort((a, b) => a.slot - b.slot);
+        barrier.deferred.splice(0, barrier.deferred.length - MAX_DEFERRED);
       }
-      barriers.set(wallet, barrier);
+      // Peak RETAINED, measured after the trim: what a soak should report is
+      // how much was actually held, not the transient one-over before trimming.
+      if (barrier.deferred.length > peakDeferred) peakDeferred = barrier.deferred.length;
       flush(wallet);
     },
+    hold(wallet) {
+      if (barriers.has(wallet)) {
+        throw new Error(
+          `cursor barrier for ${wallet} is already held — two wallet loops are running at once, ` +
+            'which defeats the barrier silently. Make it counted before running loops concurrently.',
+        );
+      }
+      barriers.set(wallet, { blocked: true, outstanding: new Set<number>(), deferred: [] });
+    },
+    reserve(wallet, slots) {
+      const barrier = barriers.get(wallet);
+      if (barrier === undefined) {
+        throw new Error(`cursor barrier for ${wallet} is not held — reserve without hold`);
+      }
+      barrier.blocked = false;
+      barrier.outstanding = new Set(slots);
+      if (barrier.outstanding.size > peakOutstanding) peakOutstanding = barrier.outstanding.size;
+      flush(wallet);
+    },
+    barrierStats: () => ({ peakDeferred, peakOutstanding, heldNow: barriers.size }),
     release(wallet) {
       const barrier = barriers.get(wallet);
       if (barrier === undefined) return;

@@ -944,7 +944,7 @@ export class WalletStream extends EventEmitter {
     // this line the wallet's cursor cannot move at all, because nothing knew
     // what was outstanding; from here a 3,000-entry replay records progress as
     // it goes, and only positions with an unhandled predecessor are held back.
-    this.deps.cursors.hold(wallet, entries.map((entry) => entry.slot));
+    this.deps.cursors.reserve(wallet, entries.map((entry) => entry.slot));
 
     for (const entry of entries) await this.handle(wallet, entry, 'gapfill');
 

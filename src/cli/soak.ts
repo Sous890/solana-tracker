@@ -135,6 +135,7 @@ async function main(): Promise<void> {
       lastNetFlowLamports = runtime.ledger.getNetLamportsFlow({ simulated: true });
       return lastNetFlowLamports;
     },
+    barrierStats: () => runtime.cursors.barrierStats(),
     recorderStats: () => {
       const session = runtime.tracker.session;
       return {

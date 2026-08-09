@@ -76,6 +76,7 @@ import { WRAPPED_SOL_MINT, baseUnitsToTokens, lamportsToSol } from '../core/unit
 import { openLedger } from '../db/ledger.js';
 import type { Ledger, ReconcileReport } from '../db/ledger.js';
 import { openCursorStore } from '../db/cursors.js';
+import type { CursorStore } from '../db/cursors.js';
 import { openRuntimeState } from '../db/runtimeState.js';
 import type { RuntimeState } from '../db/runtimeState.js';
 import { openFillsView } from '../db/fillsView.js';
@@ -1342,6 +1343,13 @@ export interface TrackerRuntime {
   config: Config;
   /** Ledger snapshots, off this volume. See `services/ledgerDurability.ts`. */
   snapshots: LedgerSnapshotter;
+  /**
+   * The wallet cursors. Exposed for `barrierStats()`, so a soak REPORTS the
+   * cursor barrier's peak rather than assuming it stayed small — and so a
+   * wallet still held at exit surfaces as a number instead of as a frozen
+   * cursor nobody notices until the next restart.
+   */
+  cursors: CursorStore;
   /** Closes every handle. Stops the tracker first; sells nothing. */
   close(): Promise<void>;
 }
@@ -1617,6 +1625,10 @@ export function createTrackerRuntime(options: TrackerRuntimeOptions): TrackerRun
     fills,
     config,
     snapshots,
+    // Exposed so a soak can REPORT the barrier's peak rather than assume it.
+    // `deferred` is bounded now, but a run that sits near the bound is telling
+    // you something about gap-fill length that a bound alone hides.
+    cursors,
     async close() {
       await tracker.shutdown();
       // Before the handles close, so the last snapshot has the final state in it.
