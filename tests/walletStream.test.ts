@@ -1576,3 +1576,108 @@ describe('gap-fill barrier release', () => {
     cursors.close();
   });
 });
+
+// ---------------------------------------------------------------------------
+// The reconnect chain
+// ---------------------------------------------------------------------------
+
+describe('a disconnect during reconnection', () => {
+  const tick = async (times = 8): Promise<void> => {
+    for (let i = 0; i < times; i += 1) await new Promise((r) => setImmediate(r));
+  };
+
+  it('is not lost while the reconnect that follows it is still gap filling', async () => {
+    // `reconnect()` connects, then gap fills, then declares success. The socket
+    // it just established can die inside that gap fill — and `beginReconnect`
+    // refuses to start a chain while `reconnecting` is true, so the death is
+    // dropped. The loop then finishes, announces `reconnected` for a socket that
+    // is gone, clears the flag, and returns. Nothing is left watching.
+    const cursors = openCursorStore({ path: ':memory:' });
+    cursors.set(WALLET, 'sig-1', 101);
+
+    const full = entries(4);
+    const history: SignatureEntry[] = [full.at(-1)!];
+    let releaseFetch: (() => void) | undefined;
+    const gate = new Promise<void>((resolve) => {
+      releaseFetch = resolve;
+    });
+    let gateArmed = false;
+
+    const rpc: RpcClient = {
+      async getSignaturesForAddress(_address, opts) {
+        let list = [...history];
+        if (opts.until !== undefined) {
+          const index = list.findIndex((e) => e.signature === opts.until);
+          if (index !== -1) list = list.slice(0, index);
+        }
+        return list.slice(0, 1_000);
+      },
+      async getTransaction(signature) {
+        if (gateArmed && signature === 'sig-2') await gate;
+        const entry = history.find((e) => e.signature === signature);
+        return entry === undefined ? null : txFor(signature, entry.slot);
+      },
+    };
+
+    const sockets: Array<ReturnType<typeof fakeSocket>> = [];
+    const closed = new Set<number>();
+    const stream = new WalletStream({
+      wallets: [WALLET],
+      rpc,
+      cursors,
+      connect: async () => {
+        const index = sockets.length;
+        const socket = fakeSocket(1_000 * (index + 1));
+        const shut = socket.socket.close.bind(socket.socket);
+        socket.socket.close = () => {
+          closed.add(index);
+          shut();
+        };
+        sockets.push(socket);
+        return socket.socket;
+      },
+      now: () => 1_700_000_000_000,
+      sleep: async () => undefined,
+      random: () => 0,
+    });
+    stream.on('error', () => undefined);
+    // `attempt` is not a proxy for which socket succeeded — `connectOnce` resets
+    // the counter on every success, so a second successful connect reports
+    // attempt 1 again. What matters is whether a socket was actually alive at
+    // the moment success was announced.
+    const reconnected: Array<{ liveSocket: boolean }> = [];
+    stream.on('reconnected', () =>
+      reconnected.push({ liveSocket: !closed.has(sockets.length - 1) }),
+    );
+
+    await stream.start();
+    expect(sockets).toHaveLength(1);
+
+    // Work for the reconnect's gap fill to get stuck in.
+    history.length = 0;
+    history.push(...full);
+    gateArmed = true;
+
+    sockets[0]!.socket.close();
+    await tick();
+    expect(sockets).toHaveLength(2);
+
+    // The socket the reconnect just established dies, mid gap fill.
+    sockets[1]!.socket.close();
+    await tick();
+
+    releaseFetch?.();
+    await tick(20);
+
+    // Either it reconnected again, or it is sitting with no socket and nothing
+    // pending — which is the stream being silently dead for the rest of the run.
+    expect(sockets.length).toBeGreaterThanOrEqual(3);
+    // Success announced exactly once, and for a socket that was actually live.
+    // Before the fix this fired while the newest socket was already closed.
+    expect(reconnected).toHaveLength(1);
+    expect(reconnected[0]?.liveSocket).toBe(true);
+
+    stream.stop();
+    cursors.close();
+  });
+});

@@ -48,6 +48,20 @@ export interface CursorStore {
    *
    * Idempotent, and a second call replaces the first: `hold(w)` then
    * `hold(w, slots)` is the intended sequence.
+   *
+   * NOT REENTRANT, and this is a precondition rather than an oversight. Two
+   * wallet loops running at once would defeat it silently: `release` deletes the
+   * barrier outright, so the first loop to finish a wallet drops the second
+   * loop's protection, and `hold(w, slots)` replaces the outstanding set instead
+   * of unioning with it, so the first loop's remaining entries stop holding
+   * anything back. Only one `gapFillAll` may be in flight.
+   *
+   * That holds today: `reconnect()` is guarded by `reconnecting`, and `start()`
+   * finishes its loop before a socket exists. It did NOT hold before the
+   * chain-splitting fix of 2026-08-06 (b1b02ea), which is where the doubled
+   * `gap-filled` events in the 2026-08-05 sessions come from. Anything that
+   * reintroduces concurrent loops — the queued round-robin change is the
+   * obvious candidate — has to make this counted first.
    */
   hold(wallet: Address, slots?: readonly number[]): void;
   /** Everything outstanding for this wallet is handled or abandoned. */

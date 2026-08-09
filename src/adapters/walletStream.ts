@@ -358,6 +358,8 @@ export class WalletStream extends EventEmitter {
   private running = false;
   /** One reconnect loop at a time. See `beginReconnect`. */
   private reconnecting = false;
+  /** A socket death that arrived while a reconnect was already in flight. */
+  private reconnectRequested = false;
   private draining = false;
   private attempt = 0;
   private lastMessageAt = 0;
@@ -503,13 +505,37 @@ export class WalletStream extends EventEmitter {
     this.beginReconnect();
   }
 
-  /** Start the single reconnect loop, if one is not already running. */
+  /**
+   * Start the single reconnect loop, if one is not already running.
+   *
+   * A request that arrives while one IS running is remembered, not dropped.
+   * Dropping it was a lost wakeup: the chain in flight may have connected
+   * already and be inside its gap fill, in which case the socket that just died
+   * is the one that chain established — so it will never re-establish it. The
+   * loop then finished, announced `reconnected` for a socket that was gone,
+   * cleared the flag and returned, leaving nothing watching and no way back.
+   * The stream was dead for the rest of the process with the feed simply quiet.
+   */
   private beginReconnect(): void {
-    if (!this.running || this.reconnecting) return;
+    if (!this.running) return;
+    if (this.reconnecting) {
+      this.reconnectRequested = true;
+      return;
+    }
     this.reconnecting = true;
-    void this.reconnect().finally(() => {
-      this.reconnecting = false;
-    });
+    void this.reconnect()
+      .catch((error: unknown) => {
+        // `gapFillAll` can throw — `emit('swap')` is synchronous and everything
+        // downstream of it is somebody else's code. Unhandled here it would be
+        // an unhandled rejection, which ends the process.
+        this.emit('error', error as Error);
+      })
+      .finally(() => {
+        this.reconnecting = false;
+        const pending = this.reconnectRequested;
+        this.reconnectRequested = false;
+        if (pending && this.running && this.socket === undefined) this.beginReconnect();
+      });
   }
 
   /** Full jitter over an exponential base, uncapped in attempts. */
@@ -543,6 +569,18 @@ export class WalletStream extends EventEmitter {
       // through the cursor. The socket is already live and delivering at this
       // point — see `gapFillAll`, which is what makes that safe.
       await this.gapFillAll();
+
+      // The socket can die inside that gap fill, and on a long one it often
+      // will. `reconnected` means "the feed is live again"; emitting it for a
+      // socket that has already gone reports a working feed that is not there,
+      // and every reconnect-latency figure measured from it is measuring the
+      // wrong interval. Keep retrying instead — this chain owns the retry, so
+      // it does not depend on the dropped-wakeup path above to notice.
+      if (this.socket === undefined) {
+        if (!this.running) return;
+        continue;
+      }
+
       this.emit('reconnected', { attempt });
       return;
     }
