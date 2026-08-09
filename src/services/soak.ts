@@ -94,7 +94,42 @@ const UNHANDLED_THRESHOLD = 0;
 const UNHANDLED_BASIS =
   'measured 0 unhandled, n=7,184 unparsed records, across the 3 soaks of 2026-08-06/07 (195.7 min combined)';
 
+/**
+ * How close together two socket-death events must be to be one death.
+ *
+ * ── DERIVED IN SESSION 25, FROM TWO POPULATIONS THAT DO NOT OVERLAP ───────
+ *
+ * A real WebSocket fires `error` and then `close` for a single death and both
+ * reach the digest. Measured across the eleven sessions on record: the 56
+ * error/close pairs are **0ms min, 0ms p50, 1ms p90, 34ms max**, while the 35
+ * gaps between genuinely distinct deaths are **9,946ms at the very smallest**.
+ * The populations are separated by a factor of 292, so the window is not a
+ * judgement call — anything in (34ms, 9,946ms) classifies every observed event
+ * identically.
+ *
+ * 1,000ms: near the geometric midpoint of that gap (~581ms), 29x above the
+ * largest pair seen and 10x inside the closest distinct pair of deaths. Chosen
+ * round rather than exact because nothing in the data distinguishes 581 from
+ * 1,000, and a number with false precision invites someone to trust it further
+ * than the measurement supports.
+ */
+const DEATH_DEDUPE_MS = 1_000;
+const DEATH_DEDUPE_BASIS =
+  'pairs max 34ms (n=56) vs closest distinct deaths 9,946ms (n=35), 11 sessions to 2026-08-07';
+
 export interface SoakSnapshot {
+  /**
+   * Bumped when a field changes meaning rather than merely being added.
+   *
+   * Digests written before this existed are schema 0 and are NOT comparable to
+   * schema 1 on the stream figures. `stream.disconnects` summed connect-attempt
+   * failures with socket deaths and double-counted the deaths, and
+   * `reconnectLatencyMs` was measured to a `reconnected` event that could fire
+   * for a socket which had already died — so the `p50 36113ms` in
+   * `digest-001-final-SIGTERM.json` is an interval that may have ended with no
+   * socket. See `docs/digest-schema.md`.
+   */
+  schema: 1;
   window: { startedAt: UnixMillis; at: UnixMillis; elapsedMs: number };
 
   /** Tracked swaps, by venue. The denominator for the unparsed ratio below. */
@@ -152,7 +187,19 @@ export interface SoakSnapshot {
   noRouteWhileHeld: Tally;
 
   stream: {
-    disconnects: number;
+    /**
+     * Sockets that were live and died. The number that says how often the feed
+     * actually broke.
+     */
+    socketDeaths: number;
+    /**
+     * Retries that never opened a socket. High is not alarming on its own — one
+     * outage against a backoff capped at 30s emits one per attempt — but it is
+     * how long recovery took.
+     */
+    connectAttemptFailures: number;
+    /** `error`+`close` for one death, collapsed. See `DEATH_DEDUPE_MS`. */
+    deathEchoesCollapsed: number;
     reconnects: number;
     /** ms between a disconnect and the reconnect that followed it. */
     reconnectLatencyMs: { count: number; p50: number; max: number };
@@ -230,7 +277,10 @@ export class SoakDigest {
   private readonly noRoute = new Map<string, number>();
   private readonly quoteErrors = new Map<string, number>();
 
-  private disconnects = 0;
+  private connectAttemptFailures = 0;
+  private socketDeaths = 0;
+  private deathEchoes = 0;
+  private lastDeathAt: UnixMillis | undefined;
   private reconnects = 0;
   private lastDisconnectAt: UnixMillis | undefined;
   private readonly reconnectLatencies: number[] = [];
@@ -309,8 +359,30 @@ export class SoakDigest {
         break;
       }
       case 'stream-disconnected': {
-        this.disconnects += 1;
-        this.lastDisconnectAt = (data as { at?: number }).at;
+        const event = data as { at?: number; phase?: string };
+        if (event.phase === 'connect-attempt') {
+          // No socket ever existed. One outage emits one of these per retry,
+          // so this is a measure of how long recovery took, not of how often
+          // the feed broke.
+          this.connectAttemptFailures += 1;
+          break;
+        }
+
+        // A real WebSocket fires `error` and then `close` for one death, and
+        // both reach here. Collapse them, so a death counts once.
+        const at = event.at;
+        const isEcho =
+          at !== undefined &&
+          this.lastDeathAt !== undefined &&
+          at - this.lastDeathAt <= DEATH_DEDUPE_MS;
+        if (isEcho) {
+          this.deathEchoes += 1;
+          break;
+        }
+
+        this.socketDeaths += 1;
+        this.lastDeathAt = at;
+        this.lastDisconnectAt = at;
         break;
       }
       case 'stream-reconnected': {
@@ -431,6 +503,7 @@ export class SoakDigest {
     }
 
     return {
+      schema: 1,
       window: { startedAt: this.options.startedAt, at, elapsedMs: at - this.options.startedAt },
       trackedSwapsByVenue: sorted(this.venues),
       trackedSwapsTotal: trackedTotal,
@@ -447,7 +520,9 @@ export class SoakDigest {
       guardRejectionsByCode: sorted(this.rejections),
       noRouteWhileHeld: sorted(this.noRoute),
       stream: {
-        disconnects: this.disconnects,
+        socketDeaths: this.socketDeaths,
+        connectAttemptFailures: this.connectAttemptFailures,
+        deathEchoesCollapsed: this.deathEchoes,
         reconnects: this.reconnects,
         reconnectLatencyMs: {
           count: latencies.length,
@@ -523,7 +598,9 @@ export function formatDigest(snapshot: SoakSnapshot): string {
     ['no route while held', tallyText(snapshot.noRouteWhileHeld)],
     [
       'stream',
-      `${snapshot.stream.disconnects} down / ${snapshot.stream.reconnects} up, ` +
+      `${snapshot.stream.socketDeaths} socket deaths / ${snapshot.stream.reconnects} recovered ` +
+        `(${snapshot.stream.connectAttemptFailures} failed attempts, ` +
+        `${snapshot.stream.deathEchoesCollapsed} echoes collapsed at ${DEATH_DEDUPE_MS}ms; ${DEATH_DEDUPE_BASIS}), ` +
         `reconnect p50 ${snapshot.stream.reconnectLatencyMs.p50}ms max ${snapshot.stream.reconnectLatencyMs.max}ms, ` +
         `${snapshot.stream.gapFills} gap fills recovering ${snapshot.stream.signaturesRecovered} sigs`,
     ],

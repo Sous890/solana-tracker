@@ -310,6 +310,24 @@ export interface QueueOverflowEvent {
   droppedSignatures: string[];
 }
 
+/**
+ * Why the stream is not connected.
+ *
+ * `phase` exists because these two were indistinguishable downstream and got
+ * counted as one number. A **connect-attempt** failure means no socket ever
+ * existed — the reconnect loop retries with backoff capped at 30s, so a single
+ * outage emits thousands of them. A **socket-death** means a socket that was
+ * live is gone. Across the eleven sessions on record the split was 25,783
+ * attempt failures to 95 death emissions, and the digest reported their sum.
+ *
+ * Discriminated by a field rather than by matching on `reason`, which is a
+ * transport error message and changes with the library.
+ */
+export interface DisconnectedEvent {
+  reason: string;
+  phase: 'connect-attempt' | 'socket-death';
+}
+
 export interface GapFilledEvent {
   wallet: Address;
   count: number;
@@ -493,7 +511,10 @@ export class WalletStream extends EventEmitter {
       this.socket = undefined;
       // Reported, because a failed attempt is as much a part of an outage's
       // shape as the disconnection that started it. It does NOT start a chain.
-      this.emit('disconnected', { reason: (error as Error).message });
+      this.emit('disconnected', {
+        reason: (error as Error).message,
+        phase: 'connect-attempt',
+      } satisfies DisconnectedEvent);
       return false;
     }
   }
@@ -511,7 +532,7 @@ export class WalletStream extends EventEmitter {
   private onDisconnect(reason: string): void {
     if (this.socket === undefined) return;
     this.socket = undefined;
-    this.emit('disconnected', { reason });
+    this.emit('disconnected', { reason, phase: 'socket-death' } satisfies DisconnectedEvent);
     this.beginReconnect();
   }
 

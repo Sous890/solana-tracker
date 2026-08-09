@@ -462,16 +462,56 @@ describe('soak digest', () => {
 
   it('measures reconnect latency between a disconnect and the reconnect after it', () => {
     const digest = digestOf();
-    digest.observe('stream-disconnected', { at: T0 });
+    digest.observe('stream-disconnected', { at: T0, phase: 'socket-death' });
     digest.observe('stream-reconnected', { at: T0 + 2_500 });
-    digest.observe('stream-disconnected', { at: T0 + 10_000 });
+    digest.observe('stream-disconnected', { at: T0 + 10_000, phase: 'socket-death' });
     digest.observe('stream-reconnected', { at: T0 + 10_400 });
     digest.observe('stream-gap-filled', { count: 37, truncated: false });
 
     const snapshot = digest.snapshot(T0);
-    expect(snapshot.stream.disconnects).toBe(2);
+    expect(snapshot.stream.socketDeaths).toBe(2);
     expect(snapshot.stream.reconnectLatencyMs.max).toBe(2_500);
     expect(snapshot.stream.signaturesRecovered).toBe(37);
+  });
+
+  // -- the disconnect split -------------------------------------------------
+
+  it('counts a retry that never opened a socket apart from a socket that died', () => {
+    const digest = digestOf();
+    digest.observe('stream-disconnected', { at: T0, phase: 'socket-death' });
+    // One outage against a 30s-capped backoff emits one of these per attempt.
+    // Summed with the death above, this is what made `disconnects` unreadable:
+    // 25,783 attempt failures against ~39 real deaths, reported as one number.
+    for (let i = 1; i <= 40; i += 1) {
+      digest.observe('stream-disconnected', { at: T0 + i * 1_000, phase: 'connect-attempt' });
+    }
+
+    const snapshot = digest.snapshot(T0);
+    expect(snapshot.stream.socketDeaths).toBe(1);
+    expect(snapshot.stream.connectAttemptFailures).toBe(40);
+  });
+
+  it('collapses the error/close pair a single socket death emits', () => {
+    const digest = digestOf();
+    // A real WebSocket fires both, 0-1ms apart. Measured max across the corpus
+    // is 34ms; the closest genuinely distinct deaths are 9,946ms apart.
+    digest.observe('stream-disconnected', { at: T0, phase: 'socket-death' });
+    digest.observe('stream-disconnected', { at: T0 + 1, phase: 'socket-death' });
+    digest.observe('stream-disconnected', { at: T0 + 34, phase: 'socket-death' });
+
+    const snapshot = digest.snapshot(T0);
+    expect(snapshot.stream.socketDeaths).toBe(1);
+    expect(snapshot.stream.deathEchoesCollapsed).toBe(2);
+  });
+
+  it('keeps two deaths separate once they are further apart than the window', () => {
+    const digest = digestOf();
+    digest.observe('stream-disconnected', { at: T0, phase: 'socket-death' });
+    digest.observe('stream-disconnected', { at: T0 + 9_946, phase: 'socket-death' });
+
+    const snapshot = digest.snapshot(T0);
+    expect(snapshot.stream.socketDeaths).toBe(2);
+    expect(snapshot.stream.deathEchoesCollapsed).toBe(0);
   });
 
   it('ASSERTS paper balance drift is zero, and finds it when it is not', () => {
