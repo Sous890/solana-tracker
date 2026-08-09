@@ -525,9 +525,24 @@ export class Tracker extends EventEmitter {
     // is a recorded session input — the recorder classifies them as excluded
     // outputs by name, and a fifth one nobody added to that list would show up
     // as `unmodeled` rather than vanishing.
-    deps.stream.on('unparsed', (result: { reason?: string; signature?: string }) => {
-      this.record('swap-unparsed', { reason: result.reason ?? 'UNKNOWN', signature: result.signature });
-    });
+    deps.stream.on(
+      'unparsed',
+      (
+        result: { reason?: string; signature?: string },
+        context?: { wallet?: Address; slot?: number; source?: string },
+      ) => {
+        this.record('swap-unparsed', {
+          reason: result.reason ?? 'UNKNOWN',
+          signature: result.signature,
+          // Attribution, so a later measurement over these does not have to
+          // reconstruct which wallet they belonged to or where on the chain
+          // they sat. No existing session file gains these retroactively.
+          wallet: context?.wallet,
+          slot: context?.slot,
+          source: context?.source,
+        });
+      },
+    );
     deps.stream.on('disconnected', (payload: unknown) => {
       this.record('stream-disconnected', { ...(payload as object), at: this.now() });
     });

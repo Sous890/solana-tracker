@@ -1681,3 +1681,62 @@ describe('a disconnect during reconnection', () => {
     cursors.close();
   });
 });
+
+// ---------------------------------------------------------------------------
+// Attribution on the recorded events
+// ---------------------------------------------------------------------------
+
+describe('feed events carry enough to be measured later', () => {
+  it('stamps a slot on every fetch window, resolved or not', async () => {
+    const { rpc } = fakeRpc({ history: entries(2) });
+    const h = harness(rpc, () => fakeSocket().socket);
+    const windows: Array<{ signature: string; slot: number }> = [];
+    h.stream.on('fetch-window', (event: { signature: string; slot: number }) =>
+      windows.push(event),
+    );
+    try {
+      await h.stream.start();
+      // entries(2) is sig-2 at slot 102 and sig-1 at slot 101.
+      expect(windows.map((w) => [w.signature, w.slot])).toEqual([
+        ['sig-1', 101],
+        ['sig-2', 102],
+      ]);
+    } finally {
+      h.stream.stop();
+      h.close();
+    }
+  });
+
+  it('attributes an unparsed transaction to a wallet and a slot', async () => {
+    // `UnparsedTransaction` carries neither, so without the context argument a
+    // recorded `swap-unparsed` cannot be tied to a wallet at all — and unparsed
+    // records are the majority of tracked traffic.
+    const absent = 'popo3Rj6arKNttyUFpWfbkv2gG8uS13TGtmH6JPMuHz';
+    const cursors = openCursorStore({ path: ':memory:' });
+    const { rpc } = fakeRpc({ history: entries(1) });
+    const stream = new WalletStream({
+      wallets: [absent],
+      rpc,
+      cursors,
+      connect: async () => fakeSocket().socket,
+      now: () => 1_700_000_000_000,
+      sleep: async () => undefined,
+      random: () => 0,
+    });
+    const seen: Array<{ reason: string; wallet?: string; slot?: number; source?: string }> = [];
+    stream.on('unparsed', (result: { reason: string }, context: any) =>
+      seen.push({ reason: result.reason, ...context }),
+    );
+    stream.on('error', () => undefined);
+
+    await stream.start();
+    expect(seen).toHaveLength(1);
+    expect(seen[0]?.reason).toBe('WALLET_NOT_IN_TX');
+    expect(seen[0]?.wallet).toBe(absent);
+    expect(seen[0]?.slot).toBe(101);
+    expect(seen[0]?.source).toBe('gapfill');
+
+    stream.stop();
+    cursors.close();
+  });
+});

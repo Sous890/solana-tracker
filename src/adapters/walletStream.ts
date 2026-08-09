@@ -241,6 +241,16 @@ export function orderOldestFirst(entries: SignatureEntry[]): SignatureEntry[] {
 export interface FetchWindowEvent {
   wallet: Address;
   signature: string;
+  /**
+   * Where on the chain this sat, so a recorded session can be ordered by
+   * position rather than by the order the process happened to handle things.
+   *
+   * Its absence is why session 25's cursor cross-check could only ever be a
+   * reconstruction: the barrier compares slots, and no recorded session carried
+   * one. Taken from the signature entry rather than the fetched transaction,
+   * because it must be present even when the fetch returned nothing.
+   */
+  slot: number;
   /** 1 means it was fetchable immediately. */
   attempts: number;
   /** From first fetch attempt to the one that returned, in ms. */
@@ -768,6 +778,7 @@ export class WalletStream extends EventEmitter {
       this.emit('fetch-window', {
         wallet,
         signature: entry.signature,
+        slot: entry.slot,
         attempts,
         elapsedMs: this.deps.now() - startedAt,
         resolved: tx !== null,
@@ -842,7 +853,13 @@ export class WalletStream extends EventEmitter {
         pathDisagreement: result.pathDisagreement,
       });
     } else {
-      this.emit('unparsed', result);
+      // Context alongside, the way `swap` already carries its parse metadata.
+      // `UnparsedTransaction` is `{ kind, signature, reason, detail? }` — no
+      // wallet, no slot — so a recorded `swap-unparsed` could not be attributed
+      // to a wallet or placed on the chain at all, and any later measurement
+      // over it had to reconstruct both. Passed here rather than added to the
+      // parser's result type, which would put delivery facts in a pure function.
+      this.emit('unparsed', result, { wallet, slot: tx.slot, source });
     }
 
     // Only now. The cursor means "delivered", so a crash before this point
