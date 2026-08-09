@@ -27,6 +27,73 @@ import { lamportsToSol } from '../core/units.js';
 /** Counts keyed by something, always emitted in sorted key order. */
 export type Tally = Record<string, number>;
 
+/**
+ * Reason codes the parser is known to assign on purpose.
+ *
+ * ── AN ALLOWLIST, AND THE DIRECTION MATTERS ───────────────────────────────
+ *
+ * A transaction is `classified` only by MATCHING something here. It never
+ * becomes classified by failing to match a denylist, because that is the shape
+ * that hides drift: the parser gains a seventh code, nothing here changes, and
+ * the new code is silently absorbed into a distribution nobody alarms on.
+ * Inverted, the same event trips `unhandled` on its first occurrence.
+ *
+ * This mirrors `isInfrastructureOnly`, which returns false for a program set it
+ * does not recognise rather than assuming an unknown program is infrastructure.
+ * There, an unknown venue is admitted as a trade; here, an unknown code is
+ * admitted as a defect. Both fail towards being noticed.
+ *
+ * Every entry is a positive determination the parser reached — including the
+ * ones that sound like failures. `MULTI_MINT_DELTA` is a deliberate refusal to
+ * guess at a multi-leg route; `TX_FAILED` is a transaction that failed on chain
+ * and moved nothing. Neither is the parser meeting something it cannot handle,
+ * which is the only thing worth waking somebody for.
+ *
+ * Kept as string literals rather than imported from `swapParser.ts`'s
+ * `UnparsedCode` union, deliberately. Importing it would make the two sets
+ * identical BY CONSTRUCTION, and a new code would arrive here already
+ * allowlisted — which is precisely the drift this is built to catch. The
+ * duplication is the check.
+ */
+const CLASSIFIED_UNPARSED_CODES: ReadonlySet<string> = new Set([
+  'TX_FAILED',
+  'NO_MINT_DELTA',
+  'MULTI_MINT_DELTA',
+  'NO_SOL_LEG',
+  'WALLET_NOT_IN_TX',
+  'INFRASTRUCTURE_ONLY',
+]);
+
+/**
+ * What trips the unhandled alarm, and where that number comes from.
+ *
+ * ── RE-DERIVED IN SESSION 25. THE OLD CONSTANT WAS NOT CARRIED ACROSS ─────
+ *
+ * The predecessor was `>1% of tracked traffic`, and it measured the wrong
+ * population: every unparsed transaction, including the ones the parser had
+ * correctly declined. It fired at **97.05%** on `digest-001-final-SIGTERM.json`
+ * — a healthy run — and session 24's `INFRASTRUCTURE_ONLY` subtraction, which
+ * landed seven minutes after that digest was written and has never run, would
+ * have brought it to **46.82%** rather than to green. The 1% was inherited from
+ * an exit criterion about program IDs and could name no run and no `n`, so it
+ * was re-derived rather than adjusted.
+ *
+ * Measured across the three most recent soaks — `20260806T152610Z-000`,
+ * `20260807T023620Z-000`, `20260807T025234Z-000`, 195.7 minutes combined —
+ * every one of **n=7,184** unparsed records carried a code from the allowlist
+ * above. The genuine unhandled rate is **0 of 7,184 (0 bps)**. It is also 0
+ * across all eleven session files on disk, n=16,474, which is corroboration
+ * rather than an independent measurement — the same parser produced both.
+ *
+ * A rate whose observed value is zero does not get a percentage band; the
+ * honest threshold is ANY occurrence. That makes this a zero-threshold
+ * invariant like the drift and recorder checks, and it can no longer be moved
+ * by traffic mix — which is the whole failure mode being removed.
+ */
+const UNHANDLED_THRESHOLD = 0;
+const UNHANDLED_BASIS =
+  'measured 0 unhandled, n=7,184 unparsed records, across the 3 soaks of 2026-08-06/07 (195.7 min combined)';
+
 export interface SoakSnapshot {
   window: { startedAt: UnixMillis; at: UnixMillis; elapsedMs: number };
 
@@ -46,16 +113,34 @@ export interface SoakSnapshot {
    */
   unparsedByReason: Tally;
   unparsedTotal: number;
+
   /**
-   * Token movements refused because no venue program ran — `INFRASTRUCTURE_ONLY`.
+   * Unparsed transactions the parser reached a determination about, by code.
    *
-   * Excluded from `unparsedShareBps`, which is an alarm about the parser meeting
-   * something it cannot handle. These are transactions it handled correctly by
-   * declining them.
+   * **A distribution, not an alarm.** Printed so a sudden move in the mix is
+   * still visible — infrastructure traffic going from 5% to 95% is worth
+   * seeing — but nothing here is a finding, because every one of these is the
+   * parser working. `filteredNonTrades` used to break `INFRASTRUCTURE_ONLY` out
+   * of this set as a special case; it is now one code among six and needs no
+   * special handling.
    */
-  filteredNonTrades: number;
-  /** Unparsed as a share of tracked swaps, in integer basis points. */
-  unparsedShareBps: number;
+  classifiedByCode: Tally;
+  classifiedTotal: number;
+  /** Classified as a share of all observed transactions, in integer bps. */
+  classifiedShareBps: number;
+
+  /**
+   * Unparsed transactions with no positive determination, by whatever the
+   * reason field held. **This is the alarm.**
+   *
+   * Nonzero means the parser produced something this module cannot account for:
+   * a code it has never been taught, or no code at all. Either way the digest is
+   * reporting on a population it does not fully understand, and the share above
+   * is that much less trustworthy.
+   */
+  unhandledByCode: Tally;
+  unhandledTotal: number;
+  unhandledShareBps: number;
 
   /** Recorder events with no schema, by tag. Nonzero is the finding. */
   unmodeledByTag: Tally;
@@ -317,24 +402,31 @@ export class SoakDigest {
     for (const [mint, count] of [...this.noRoute].sort()) {
       findings.push(`NO_ROUTE while holding ${mint} (${count}x) — needs an explanation`);
     }
-    // `INFRASTRUCTURE_ONLY` is a CLASSIFICATION, not a failure to parse.
+    // Split by POSITIVE determination. See `CLASSIFIED_UNPARSED_CODES`.
     //
-    // The >1% threshold was set when every unparsed transaction meant the
-    // parser had met something it could not handle. Since session 24 the parser
-    // deliberately refuses token movements that no venue program touched — and
-    // those are the majority of tracked traffic on these wallets, so leaving
-    // them in the ratio makes this finding fire on every healthy run. That is
-    // the same defect as the paper-drift check above, introduced by the same
-    // session that fixed it, and it trains people to ignore findings.
-    //
-    // Counted and reported separately, so the number is not lost: a sudden move
-    // in the filtered share is still worth seeing, it just is not this alarm.
-    const filteredTotal = this.unparsed.get('INFRASTRUCTURE_ONLY') ?? 0;
-    const unparsedFailures = unparsedTotal - filteredTotal;
-    const shareBps = bps(unparsedFailures, trackedTotal + unparsedFailures);
-    if (shareBps > 100) {
+    // The question this alarm asks is "how much of the feed can the parser not
+    // account for", not "how much of the feed was not a swap". The second one is
+    // a property of who the tracked wallets are and moves with the market; it
+    // was what the >1% threshold actually measured, and it is why that finding
+    // fired at 97.05% on a run where nothing was wrong.
+    const classified = new Map<string, number>();
+    const unhandled = new Map<string, number>();
+    for (const [code, count] of this.unparsed) {
+      if (CLASSIFIED_UNPARSED_CODES.has(code)) classified.set(code, count);
+      else unhandled.set(code, count);
+    }
+    const classifiedTotal = [...classified.values()].reduce((a, b) => a + b, 0);
+    const unhandledTotal = [...unhandled.values()].reduce((a, b) => a + b, 0);
+    const observedTotal = trackedTotal + unparsedTotal;
+    const classifiedShareBps = bps(classifiedTotal, observedTotal);
+    const unhandledShareBps = bps(unhandledTotal, observedTotal);
+
+    if (unhandledTotal > UNHANDLED_THRESHOLD) {
+      const codes = [...unhandled.keys()].sort().join(', ');
       findings.push(
-        `unparsed transactions are ${(shareBps / 100).toFixed(2)}% of tracked traffic (>1%)`,
+        `${unhandledTotal} unparsed transaction(s) carried no code this digest recognises ` +
+          `[${codes}] — ${(unhandledShareBps / 100).toFixed(2)}% of observed traffic, ` +
+          `threshold >${UNHANDLED_THRESHOLD}, basis: ${UNHANDLED_BASIS}`,
       );
     }
 
@@ -344,8 +436,12 @@ export class SoakDigest {
       trackedSwapsTotal: trackedTotal,
       unparsedByReason: sorted(this.unparsed),
       unparsedTotal,
-      unparsedShareBps: shareBps,
-      filteredNonTrades: filteredTotal,
+      classifiedByCode: sorted(classified),
+      classifiedTotal,
+      classifiedShareBps,
+      unhandledByCode: sorted(unhandled),
+      unhandledTotal,
+      unhandledShareBps,
       unmodeledByTag: sorted(this.unmodeled),
       unmodeledTotal: recorder.unmodeled,
       guardRejectionsByCode: sorted(this.rejections),
@@ -412,8 +508,13 @@ export function formatDigest(snapshot: SoakSnapshot): string {
     ['elapsed', `${hours} h`],
     ['tracked swaps', `${snapshot.trackedSwapsTotal}  [${tallyText(snapshot.trackedSwapsByVenue)}]`],
     [
-      'unparsed',
-      `${snapshot.unparsedTotal} (${(snapshot.unparsedShareBps / 100).toFixed(2)}%)  [${tallyText(snapshot.unparsedByReason)}]`,
+      'classified',
+      `${snapshot.classifiedTotal} (${(snapshot.classifiedShareBps / 100).toFixed(2)}%)  [${tallyText(snapshot.classifiedByCode)}]`,
+    ],
+    [
+      'unhandled',
+      `${snapshot.unhandledTotal} (${(snapshot.unhandledShareBps / 100).toFixed(2)}%)  ` +
+        `[${tallyText(snapshot.unhandledByCode)}]  must be ${UNHANDLED_THRESHOLD}`,
     ],
     ['unmodeled', `${snapshot.unmodeledTotal}  [${tallyText(snapshot.unmodeledByTag)}]`],
     ['entry intents', String(snapshot.trades.entryIntents)],

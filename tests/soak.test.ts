@@ -362,9 +362,81 @@ describe('soak digest', () => {
     const snapshot = digest.snapshot(T0 + 1000);
     expect(snapshot.trackedSwapsByVenue).toEqual({ 'raydium-v4': 1, pumpfun: 2 });
     expect(snapshot.unparsedByReason).toEqual({ MULTI_MINT_DELTA: 1 });
-    // 1 of 4 total observed transactions.
-    expect(snapshot.unparsedShareBps).toBe(2500);
-    expect(snapshot.findings.some((f) => f.includes('>1%'))).toBe(true);
+    // A code the parser positively assigned. Counted and printed, never alarmed:
+    // `MULTI_MINT_DELTA` is a determination — "this is a shape the invariant does
+    // not describe, and guessing produces a confident wrong answer" — not a
+    // failure to reach one.
+    expect(snapshot.classifiedByCode).toEqual({ MULTI_MINT_DELTA: 1 });
+    expect(snapshot.classifiedShareBps).toBe(2500);
+    expect(snapshot.unhandledTotal).toBe(0);
+    expect(snapshot.findings).toEqual([]);
+  });
+
+  // -- the split ------------------------------------------------------------
+  //
+  // Four counters had cried wolf before this one, and the unparsed rate was the
+  // fourth — created by the same session that fixed the other three. The alarm
+  // fired at 97.05% on `digest-001-final-SIGTERM.json`, a healthy run, because
+  // it measured "how much of the feed was not a swap" rather than "how much of
+  // the feed the parser could not account for". Those are different questions
+  // and only the second one is a defect.
+
+  it('does not alarm on classified codes, whatever share of the feed they are', () => {
+    const digest = digestOf();
+    digest.observe('swap-detected', { venue: 'pumpfun' });
+    // The shape of the run that fired at 97%: infrastructure traffic dominates,
+    // and every bit of it was correctly declined.
+    for (let i = 0; i < 3_496; i += 1) {
+      digest.observe('swap-unparsed', { reason: 'INFRASTRUCTURE_ONLY' });
+    }
+    for (let i = 0; i < 72; i += 1) digest.observe('swap-unparsed', { reason: 'TX_FAILED' });
+
+    const snapshot = digest.snapshot(T0 + 1000);
+    expect(snapshot.classifiedTotal).toBe(3_568);
+    expect(snapshot.classifiedShareBps).toBe(9997);
+    expect(snapshot.unhandledTotal).toBe(0);
+    expect(snapshot.unhandledShareBps).toBe(0);
+    expect(snapshot.findings).toEqual([]);
+  });
+
+  it('alarms on a code it does not positively recognise', () => {
+    const digest = digestOf();
+    for (let i = 0; i < 99; i += 1) digest.observe('swap-detected', { venue: 'pumpfun' });
+    // A reason string the digest has never been taught. The parser gaining a
+    // code without this module gaining it too is exactly the drift the split
+    // exists to catch, so it must land in `unhandled` rather than being absorbed
+    // into the classified distribution by not matching anything.
+    digest.observe('swap-unparsed', { reason: 'SOME_NEW_VENUE_SHAPE' });
+
+    const snapshot = digest.snapshot(T0 + 1000);
+    expect(snapshot.unhandledByCode).toEqual({ SOME_NEW_VENUE_SHAPE: 1 });
+    expect(snapshot.unhandledTotal).toBe(1);
+    expect(snapshot.classifiedTotal).toBe(0);
+    expect(snapshot.findings).toHaveLength(1);
+    expect(snapshot.findings[0]).toContain('SOME_NEW_VENUE_SHAPE');
+  });
+
+  it('alarms when no reason code was assigned at all', () => {
+    const digest = digestOf();
+    digest.observe('swap-detected', { venue: 'pumpfun' });
+    digest.observe('swap-unparsed', {});
+
+    const snapshot = digest.snapshot(T0 + 1000);
+    expect(snapshot.unhandledByCode).toEqual({ UNKNOWN: 1 });
+    expect(snapshot.findings).toHaveLength(1);
+  });
+
+  it('prints the threshold and the basis it was derived from', () => {
+    const digest = digestOf();
+    digest.observe('swap-unparsed', { reason: 'SOME_NEW_VENUE_SHAPE' });
+
+    const finding = digest.snapshot(T0 + 1000).findings[0] ?? '';
+    // The value, the threshold it breached, and where that threshold came from —
+    // on the line itself, so a stale basis is visible the moment it fires rather
+    // than a session later.
+    expect(finding).toContain('threshold >0');
+    expect(finding).toContain('n=7,184');
+    expect(finding).toMatch(/2026-08-0[67]/);
   });
 
   it('groups guard rejections by code and counts entry intents', () => {
