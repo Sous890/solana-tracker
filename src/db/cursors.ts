@@ -37,6 +37,21 @@ export interface CursorStore {
   get(wallet: Address): WalletCursor | undefined;
   /** Record the last emitted signature. Call after emitting, not on receipt. */
   set(wallet: Address, signature: Signature, slot: number, at?: UnixMillis): void;
+  /**
+   * Declare that work is outstanding for this wallet, so `set` cannot persist a
+   * position whose predecessors are still unhandled.
+   *
+   * With no slots, nothing advances until `release` — used before a gap fill has
+   * paged its history and can say what it is about to replay. With slots, only
+   * positions below the lowest outstanding one may persist, so a long replay
+   * still records progress as it goes.
+   *
+   * Idempotent, and a second call replaces the first: `hold(w)` then
+   * `hold(w, slots)` is the intended sequence.
+   */
+  hold(wallet: Address, slots?: readonly number[]): void;
+  /** Everything outstanding for this wallet is handled or abandoned. */
+  release(wallet: Address): void;
   all(): WalletCursor[];
   close(): void;
 }
@@ -84,13 +99,111 @@ export function openCursorStore(options: { path: string }): CursorStore {
     updatedAt: Number(row.updated_at),
   });
 
+  /**
+   * Per-wallet outstanding work, in memory only.
+   *
+   * Deliberately NOT persisted. A crash must lose these, because the whole point
+   * is that nothing above the barrier ever reached the table — so the row on disk
+   * is already the safe prefix, and recovery is "replay from it".
+   */
+  interface Barrier {
+    /** True until the caller says what it is replaying. Blocks everything. */
+    blocked: boolean;
+    /** Slots the caller intends to handle and has not finished. */
+    outstanding: Set<number>;
+    /** Completed positions not yet eligible to persist, oldest first. */
+    deferred: Array<{ signature: Signature; slot: number; at: UnixMillis }>;
+  }
+  const barriers = new Map<Address, Barrier>();
+
+  const persist = (wallet: Address, signature: Signature, slot: number, at: UnixMillis): void => {
+    statements.upsert.run(wallet, signature, slot, at);
+  };
+
+  /**
+   * Persist the newest completed position that has no unhandled predecessor.
+   *
+   * ── WHY SLOT, AND ONLY SLOT ───────────────────────────────────────────────
+   *
+   * Signature strings do not order. Slot does, and it is the one key present on
+   * BOTH delivery paths: `dispatch` writes `tx.slot` from the fetched
+   * transaction, and both gap fill and the live socket fetch before they
+   * dispatch. Intra-block position is NOT available on both — `transactionIndex`
+   * rides on `SignatureEntry` from `getSignaturesForAddress`, and a live
+   * notification is built from `{ signature, slot, err }` with no index at all.
+   *
+   * So ties inside a slot cannot be ordered, and are resolved by refusing to
+   * move: the comparison is `slot < barrier`, strictly. A completed position in
+   * the same slot as an outstanding one waits. That costs one extra replay of a
+   * block and cannot skip a sibling transaction.
+   *
+   * There is deliberately no monotonicity guard. Backwards is the safe
+   * direction — it re-delivers, and `seen` drops the duplicate — and a cursor
+   * left too far forward by the old code can only be repaired by moving it back.
+   */
+  const flush = (wallet: Address): void => {
+    const barrier = barriers.get(wallet);
+    if (barrier === undefined) return;
+
+    let limit: number;
+    if (barrier.outstanding.size > 0) limit = Math.min(...barrier.outstanding);
+    else if (barrier.blocked) limit = Number.NEGATIVE_INFINITY;
+    else limit = Number.POSITIVE_INFINITY;
+
+    let best: { signature: Signature; slot: number; at: UnixMillis } | undefined;
+    for (const entry of barrier.deferred) {
+      if (entry.slot < limit && (best === undefined || entry.slot > best.slot)) best = entry;
+    }
+    if (best === undefined) return;
+
+    persist(wallet, best.signature, best.slot, best.at);
+    barrier.deferred = barrier.deferred.filter((entry) => entry.slot > best.slot);
+  };
+
   return {
     get(wallet) {
       const row = statements.get.get(wallet) as CursorRow | undefined;
       return row === undefined ? undefined : toCursor(row);
     },
     set(wallet, signature, slot, at = Date.now()) {
-      statements.upsert.run(wallet, signature, slot, at);
+      const barrier = barriers.get(wallet);
+      // No declared work: the caller is the only producer and this is the
+      // straight-through path the store has always had.
+      if (barrier === undefined) {
+        persist(wallet, signature, slot, at);
+        return;
+      }
+      // `dispatch` writes `tx.slot`; `hold` was given `entry.slot`. They are the
+      // same transaction and should agree — if they ever do not, the delete
+      // misses, the slot stays outstanding until `release`, and the cursor is
+      // held back rather than advanced. Wrong in the safe direction.
+      barrier.outstanding.delete(slot);
+      barrier.deferred.push({ signature, slot, at });
+      flush(wallet);
+    },
+    hold(wallet, slots) {
+      const barrier = barriers.get(wallet) ?? {
+        blocked: true,
+        outstanding: new Set<number>(),
+        deferred: [],
+      };
+      if (slots === undefined) {
+        barrier.blocked = true;
+        barrier.outstanding.clear();
+      } else {
+        barrier.blocked = false;
+        barrier.outstanding = new Set(slots);
+      }
+      barriers.set(wallet, barrier);
+      flush(wallet);
+    },
+    release(wallet) {
+      const barrier = barriers.get(wallet);
+      if (barrier === undefined) return;
+      barrier.blocked = false;
+      barrier.outstanding.clear();
+      flush(wallet);
+      barriers.delete(wallet);
     },
     all() {
       return (statements.all.all() as CursorRow[]).map(toCursor);

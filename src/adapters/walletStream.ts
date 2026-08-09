@@ -380,8 +380,51 @@ export class WalletStream extends EventEmitter {
     this.running = true;
     // Gap fill on startup as well as on reconnect: the process may have been
     // down for any length of time, and the cursor is the only record of that.
-    for (const wallet of this.deps.wallets) await this.gapFill(wallet);
+    await this.gapFillAll();
     if (!(await this.connectOnce())) this.beginReconnect();
+  }
+
+  /**
+   * One pass of the wallet loop, with every wallet's cursor held for the whole
+   * of it.
+   *
+   * The hold is taken for ALL wallets up front, not per wallet at its turn. The
+   * loop is serial, so wallet 13's gap fill does not read its cursor until
+   * twelve other wallets have finished — and `reconnect()` connects BEFORE it
+   * calls this, so the socket is live and delivering the entire time. A live
+   * delivery for wallet 13 arriving during wallet 1's fill would otherwise
+   * advance 13's cursor past the window 13 is about to replay, and `until:`
+   * returns only what is NEWER, so that window is skipped. No crash required.
+   *
+   * `start()` is not exposed to that — there is no socket yet — but it takes the
+   * same hold, because the two paths differing in a property this subtle is how
+   * the next person reintroduces it.
+   */
+  private async gapFillAll(): Promise<void> {
+    const wallets = this.deps.wallets;
+    try {
+      // Inside the try, not before it. A blanket `hold` cannot persist and so
+      // cannot throw today — but that is a fact about `flush`'s internals, and
+      // the release guarantee should not depend on reading them.
+      for (const wallet of wallets) this.deps.cursors.hold(wallet);
+      for (const wallet of wallets) await this.gapFill(wallet);
+    } finally {
+      // Every hold, on every exit path: normal return, a throw out of any
+      // wallet's fill, an early return. A leaked hold is invisible — swaps keep
+      // emitting and the socket keeps looking healthy while the wallet's cursor
+      // is frozen for the life of the process, and the damage only appears at
+      // the next restart, as a replay from a cursor that stopped hours ago.
+      //
+      // Each release is isolated: one wallet's failure must not strand the
+      // twelve behind it in the loop.
+      for (const wallet of wallets) {
+        try {
+          this.deps.cursors.release(wallet);
+        } catch (error) {
+          this.emit('error', error as Error);
+        }
+      }
+    }
   }
 
   stop(): void {
@@ -497,8 +540,9 @@ export class WalletStream extends EventEmitter {
       }
 
       // Anything that happened while the socket was down is only recoverable
-      // through the cursor.
-      for (const wallet of this.deps.wallets) await this.gapFill(wallet);
+      // through the cursor. The socket is already live and delivering at this
+      // point — see `gapFillAll`, which is what makes that safe.
+      await this.gapFillAll();
       this.emit('reconnected', { attempt });
       return;
     }
@@ -819,6 +863,12 @@ export class WalletStream extends EventEmitter {
       entries = entries.slice(-MAX_COLD_FILL);
       truncated = true;
     }
+
+    // Narrow the blanket hold to exactly what is about to be replayed. Until
+    // this line the wallet's cursor cannot move at all, because nothing knew
+    // what was outstanding; from here a 3,000-entry replay records progress as
+    // it goes, and only positions with an unhandled predecessor are held back.
+    this.deps.cursors.hold(wallet, entries.map((entry) => entry.slot));
 
     for (const entry of entries) await this.handle(wallet, entry, 'gapfill');
 

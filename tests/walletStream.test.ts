@@ -1,4 +1,5 @@
-import { readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
@@ -1286,5 +1287,292 @@ describe('silence detection and reconnect', () => {
     } finally {
       h.close();
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The cursor advance, and the loss behind it
+// ---------------------------------------------------------------------------
+
+/**
+ * `reconnect()` connects BEFORE it gap fills — `connectOnce()` subscribes and the
+ * socket starts delivering, then the wallet loop runs. So live delivery and gap
+ * fill overlap on every reconnect, today, with no change to the startup order.
+ *
+ * `start()` is the ordering everyone quotes: gap fill for every wallet, then
+ * connect. That one is safe. It is also not the only path.
+ */
+describe('cursor advance while a gap fill is still running', () => {
+  const tick = async (times = 6): Promise<void> => {
+    for (let i = 0; i < times; i += 1) await new Promise((r) => setImmediate(r));
+  };
+
+  /** An RPC whose `getTransaction` can be held open for named signatures. */
+  function gatedRpc(history: SignatureEntry[]) {
+    const releases = new Map<string, () => void>();
+    const held = new Map<string, Promise<void>>();
+    const completed: string[] = [];
+    const attempted: string[] = [];
+
+    return {
+      history,
+      completed,
+      attempted,
+      /** Hold `getTransaction` for this signature until `release` is called. */
+      hold(signature: string): void {
+        let release!: () => void;
+        held.set(signature, new Promise<void>((resolve) => {
+          release = resolve;
+        }));
+        releases.set(signature, release);
+      },
+      release(signature: string): void {
+        releases.get(signature)?.();
+      },
+      rpc: {
+        async getSignaturesForAddress(_address, opts) {
+          let list = [...history];
+          if (opts.before !== undefined) {
+            const index = list.findIndex((e) => e.signature === opts.before);
+            list = index === -1 ? [] : list.slice(index + 1);
+          }
+          if (opts.until !== undefined) {
+            const index = list.findIndex((e) => e.signature === opts.until);
+            if (index !== -1) list = list.slice(0, index);
+          }
+          return list.slice(0, 1_000);
+        },
+        async getTransaction(signature) {
+          attempted.push(signature);
+          const gate = held.get(signature);
+          if (gate !== undefined) await gate;
+          completed.push(signature);
+          const entry = history.find((e) => e.signature === signature);
+          return entry === undefined ? null : txFor(signature, entry.slot);
+        },
+      } satisfies RpcClient,
+    };
+  }
+
+  function streamOn(rpc: RpcClient, cursors: CursorStore, sockets: Array<() => StreamSocket>) {
+    let index = 0;
+    const stream = new WalletStream({
+      wallets: [WALLET],
+      rpc,
+      cursors,
+      connect: async () => (sockets[index++] ?? sockets.at(-1)!)(),
+      now: () => 1_700_000_000_000,
+      sleep: async () => undefined,
+      random: () => 0,
+    });
+    const swaps: TrackedSwap[] = [];
+    stream.on('swap', (swap: TrackedSwap) => swaps.push(swap));
+    stream.on('error', () => undefined);
+    return { stream, swaps };
+  }
+
+  it('loses entries that a live delivery advanced the cursor past', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'cursor-loss-'));
+    const path = join(dir, 'cursors.db');
+    // sig-10(slot 110) .. sig-1(slot 101), newest first, as the RPC returns them.
+    const full = entries(10);
+    // The wallet has been quiet up to sig-1; everything above it happens while
+    // the socket is down.
+    const g = gatedRpc([full.at(-1)!]);
+    const seenSignatures = new Set<string>();
+
+    const before = openCursorStore({ path });
+    before.set(WALLET, 'sig-1', 101);
+    const live = fakeSocket(1_000);
+    const resumed = fakeSocket(2_000);
+    const first = streamOn(g.rpc, before, [() => live.socket, () => resumed.socket]);
+
+    // Gap fill finds nothing (cursor is already at the tip), then connects.
+    await first.stream.start();
+
+    // The wallet trades nine times while the socket is down.
+    g.history.length = 0;
+    g.history.push(...full);
+    // The gap fill that follows the reconnect will hold here.
+    g.hold('sig-3');
+
+    live.socket.close();
+    // `reconnect()` connects FIRST — `resumed` is subscribed and delivering —
+    // and only then starts the wallet loop, which reaches sig-3 and blocks.
+    await tick(8);
+
+    // Live traffic on the new socket, while sig-3..sig-9 are still outstanding.
+    resumed.deliver('sig-10', 110);
+    await tick(8);
+
+    // A crash here: work in flight, nothing more will complete.
+    first.stream.stop();
+    for (const swap of first.swaps) seenSignatures.add(swap.signature);
+    const strandedCursor = before.get(WALLET);
+    before.close();
+
+    // Leg 1: the gap fill really is mid-flight, with entries behind the hold.
+    expect(g.completed).toContain('sig-2');
+    expect(g.completed).not.toContain('sig-4');
+
+    // Leg 2: the live delivery really was processed while sig-3..sig-9 were
+    // outstanding — that is the race, and it still happens. What must not
+    // happen is the cursor naming it. Before the barrier it read sig-10 at slot
+    // 110, which is the position whose predecessors were unhandled.
+    expect(g.completed).toContain('sig-10');
+    expect(strandedCursor?.lastSlot ?? 0).toBeLessThan(110);
+    // Positively: it names the newest position whose predecessors are all done.
+    expect(strandedCursor?.lastSignature).toBe('sig-2');
+
+    // Leg 3: a restart from that cursor asks for them again.
+    //
+    // A fresh RPC, with no hold on sig-3: the process that was blocked there is
+    // the one that died, and the new one has no reason to stall on it.
+    const afterCrash = gatedRpc(full);
+    const after = openCursorStore({ path });
+    const restarted = streamOn(afterCrash.rpc, after, [() => fakeSocket(3_000).socket]);
+    await restarted.stream.start();
+    for (const swap of restarted.swaps) seenSignatures.add(swap.signature);
+    restarted.stream.stop();
+    after.close();
+    rmSync(dir, { recursive: true, force: true });
+
+    // The loss. Not "the cursor moved" — these trades are gone, and no future
+    // gap fill can reach them, because the cursor says they are done.
+    for (const lost of ['sig-4', 'sig-5', 'sig-6', 'sig-7', 'sig-8', 'sig-9']) {
+      expect(seenSignatures.has(lost)).toBe(true);
+    }
+  });
+
+  it('emits one swap when live and gap fill both carry a signature, either order', async () => {
+    // The refuted premise, pinned so it is not re-litigated. Dedup was never the
+    // exposure here: `seen` and `inFlight` are both keyed on (wallet, signature)
+    // and both delivery paths converge on `handle`, so whichever arrives second
+    // is dropped. The cursor is what was unprotected.
+    for (const liveFirst of [true, false]) {
+      const cursors = openCursorStore({ path: ':memory:' });
+      cursors.set(WALLET, 'sig-1', 101);
+      const g = gatedRpc(entries(3));
+      const socket = fakeSocket(1_000);
+      const { stream, swaps } = streamOn(g.rpc, cursors, [() => socket.socket]);
+
+      if (liveFirst) {
+        // Connect first so the notification is admitted before gap fill runs.
+        await stream.start();
+        socket.deliver('sig-3', 103);
+        await tick(8);
+      } else {
+        await stream.start();
+        await tick(8);
+        socket.deliver('sig-3', 103);
+        await tick(8);
+      }
+
+      expect(swaps.filter((s) => s.signature === 'sig-3')).toHaveLength(1);
+      stream.stop();
+      cursors.close();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The barrier must not leak
+// ---------------------------------------------------------------------------
+
+/**
+ * A hold that is never released freezes a wallet's cursor for the life of the
+ * process — silently, while swaps keep emitting and the socket keeps looking
+ * healthy. The failure is invisible until the next restart replays from a
+ * cursor that stopped moving hours ago.
+ *
+ * So the hold has to be structurally impossible to leak, not merely unlikely.
+ */
+describe('gap-fill barrier release', () => {
+  const tick = async (times = 6): Promise<void> => {
+    for (let i = 0; i < times; i += 1) await new Promise((r) => setImmediate(r));
+  };
+
+  function rpcOver(history: SignatureEntry[]): RpcClient {
+    return {
+      async getSignaturesForAddress(_address, opts) {
+        let list = [...history];
+        if (opts.until !== undefined) {
+          const index = list.findIndex((e) => e.signature === opts.until);
+          if (index !== -1) list = list.slice(0, index);
+        }
+        return list.slice(0, 1_000);
+      },
+      async getTransaction(signature) {
+        const entry = history.find((e) => e.signature === signature);
+        return entry === undefined ? null : txFor(signature, entry.slot);
+      },
+    };
+  }
+
+  it('releases every hold when the wallet loop dies mid-gap-fill', async () => {
+    const cursors = openCursorStore({ path: ':memory:' });
+    cursors.set(WALLET, 'sig-1', 101);
+    const stream = new WalletStream({
+      wallets: [WALLET],
+      rpc: rpcOver(entries(6)),
+      cursors,
+      connect: async () => fakeSocket(1_000).socket,
+      now: () => 1_700_000_000_000,
+      sleep: async () => undefined,
+      random: () => 0,
+    });
+
+    // A listener that throws is not hypothetical: `emit('swap')` is synchronous,
+    // and everything downstream of it is somebody else's code.
+    let emitted = 0;
+    stream.on('swap', () => {
+      emitted += 1;
+      if (emitted === 2) throw new Error('listener exploded mid-gap-fill');
+    });
+    stream.on('error', () => undefined);
+
+    await expect(stream.start()).rejects.toThrow('listener exploded');
+    await tick();
+
+    // The exact call a live delivery makes. If the hold leaked, this is
+    // deferred for ever and the cursor never moves again.
+    cursors.set(WALLET, 'sig-live', 500);
+    expect(cursors.get(WALLET)?.lastSignature).toBe('sig-live');
+    expect(cursors.get(WALLET)?.lastSlot).toBe(500);
+
+    stream.stop();
+    cursors.close();
+  });
+
+  it('releases the holds of wallets the loop never reached', async () => {
+    // The first wallet throws, so wallets 2 and 3 never have their gap fill run
+    // at all — but they were held up front, before the loop started.
+    const other = 'HSsJjkHrxezZ1SdhgdivhDGXbxANicWbKvKsVtrMrJvG';
+    const third = 'AgiGpUAF25B7NL9u8byDcptPcYWi4eFU4kjtcRtaMmdQ';
+    const cursors = openCursorStore({ path: ':memory:' });
+    const stream = new WalletStream({
+      wallets: [WALLET, other, third],
+      rpc: rpcOver(entries(4)),
+      cursors,
+      connect: async () => fakeSocket(1_000).socket,
+      now: () => 1_700_000_000_000,
+      sleep: async () => undefined,
+      random: () => 0,
+    });
+    stream.on('swap', () => {
+      throw new Error('first wallet exploded');
+    });
+    stream.on('error', () => undefined);
+
+    await expect(stream.start()).rejects.toThrow('first wallet exploded');
+    await tick();
+
+    for (const wallet of [WALLET, other, third]) {
+      cursors.set(wallet, `live-${wallet.slice(0, 4)}`, 900);
+      expect(cursors.get(wallet)?.lastSlot).toBe(900);
+    }
+
+    stream.stop();
+    cursors.close();
   });
 });
