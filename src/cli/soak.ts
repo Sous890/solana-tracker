@@ -126,6 +126,26 @@ async function main(): Promise<void> {
    */
   let lastNetFlowLamports = 0n;
   let ledgerOpen = true;
+  /**
+   * The recorder's counters, latched for the same reason the ledger's are.
+   *
+   * The final digest is taken while the tracker is shutting down, so
+   * `tracker.session` is already gone and `?? 0` reported ZERO: the 2026-08-09
+   * soak wrote 71,891 lines with 66,395 unmodeled events, and its final digest
+   * said `written: 0, unmodeled: 0`. Not a cosmetic slip — `unmodeledTotal` is
+   * one of the digest's four zero-threshold findings, so reading 0 meant that
+   * alarm COULD NOT FIRE on a final digest, which is the only one anybody reads.
+   *
+   * `?? 0` over an absent source is the defect. Absence is not a measurement of
+   * zero, and the last value actually observed is the honest answer.
+   */
+  let lastRecorderStats = {
+    written: 0,
+    dropped: 0,
+    droppedByKind: new Map<string, number>(),
+    rotations: 0,
+    unmodeled: 0,
+  };
 
   const digest = new SoakDigest({
     startedAt,
@@ -138,13 +158,16 @@ async function main(): Promise<void> {
     barrierStats: () => runtime.cursors.barrierStats(),
     recorderStats: () => {
       const session = runtime.tracker.session;
-      return {
-        written: session?.stats.written ?? 0,
-        dropped: session?.stats.dropped ?? 0,
-        droppedByKind: session?.stats.droppedByKind ?? new Map(),
-        rotations: session?.stats.rotations ?? 0,
-        unmodeled: session?.stats.unmodeled ?? 0,
-      };
+      if (session !== undefined) {
+        lastRecorderStats = {
+          written: session.stats.written,
+          dropped: session.stats.dropped,
+          droppedByKind: session.stats.droppedByKind,
+          rotations: session.stats.rotations,
+          unmodeled: session.stats.unmodeled,
+        };
+      }
+      return lastRecorderStats;
     },
   });
 

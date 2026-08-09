@@ -150,6 +150,22 @@ export function openCursorStore(options: { path: string }): CursorStore {
     blocked: boolean;
     /** Slots the caller intends to handle and has not finished. */
     outstanding: Set<number>;
+    /**
+     * The reserved slots in ascending order, with `head` the index of the lowest
+     * one still outstanding.
+     *
+     * ── WHY THIS IS NOT `Math.min(...outstanding)` ────────────────────────────
+     *
+     * It was, and that made the barrier QUADRATIC in the length of a gap fill:
+     * O(n) to scan on every one of n completions, plus spreading a 77,236-element
+     * set into `Math.min` each time. Measured on the 2026-08-09 soak's actual
+     * backlog: 0.012ms per completion at 1,000 outstanding, 0.155ms at 10,000,
+     * **1.611ms at 77,236** — about 124 seconds of pure CPU to drain one wallet,
+     * growing as the square. Gap fill hands entries to `handle` oldest-first, so
+     * the minimum only ever moves forward and a pointer is enough.
+     */
+    sorted: number[];
+    head: number;
     /** Completed positions not yet eligible to persist, oldest first. */
     deferred: Array<{ signature: Signature; slot: number; at: UnixMillis }>;
   }
@@ -182,12 +198,28 @@ export function openCursorStore(options: { path: string }): CursorStore {
    * direction — it re-delivers, and `seen` drops the duplicate — and a cursor
    * left too far forward by the old code can only be repaired by moving it back.
    */
+  /**
+   * The lowest slot still outstanding, amortised O(1).
+   *
+   * Walks `head` forward past everything already completed. Each index is
+   * passed at most once over the life of a reservation, so the whole drain is
+   * linear rather than quadratic.
+   */
+  const lowestOutstanding = (barrier: Barrier): number => {
+    while (barrier.head < barrier.sorted.length) {
+      const slot = barrier.sorted[barrier.head]!;
+      if (barrier.outstanding.has(slot)) return slot;
+      barrier.head += 1;
+    }
+    return Number.POSITIVE_INFINITY;
+  };
+
   const flush = (wallet: Address): void => {
     const barrier = barriers.get(wallet);
     if (barrier === undefined) return;
 
     let limit: number;
-    if (barrier.outstanding.size > 0) limit = Math.min(...barrier.outstanding);
+    if (barrier.outstanding.size > 0) limit = lowestOutstanding(barrier);
     else if (barrier.blocked) limit = Number.NEGATIVE_INFINITY;
     else limit = Number.POSITIVE_INFINITY;
 
@@ -242,7 +274,13 @@ export function openCursorStore(options: { path: string }): CursorStore {
             'which defeats the barrier silently. Make it counted before running loops concurrently.',
         );
       }
-      barriers.set(wallet, { blocked: true, outstanding: new Set<number>(), deferred: [] });
+      barriers.set(wallet, {
+        blocked: true,
+        outstanding: new Set<number>(),
+        sorted: [],
+        head: 0,
+        deferred: [],
+      });
     },
     reserve(wallet, slots) {
       const barrier = barriers.get(wallet);
@@ -251,6 +289,8 @@ export function openCursorStore(options: { path: string }): CursorStore {
       }
       barrier.blocked = false;
       barrier.outstanding = new Set(slots);
+      barrier.sorted = [...barrier.outstanding].sort((a, b) => a - b);
+      barrier.head = 0;
       if (barrier.outstanding.size > peakOutstanding) peakOutstanding = barrier.outstanding.size;
       flush(wallet);
     },
@@ -260,6 +300,7 @@ export function openCursorStore(options: { path: string }): CursorStore {
       if (barrier === undefined) return;
       barrier.blocked = false;
       barrier.outstanding.clear();
+      barrier.head = barrier.sorted.length;
       flush(wallet);
       barriers.delete(wallet);
     },

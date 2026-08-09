@@ -414,3 +414,32 @@ describe('the barrier precondition', () => {
     }
   });
 });
+
+describe('barrier cost at soak scale', () => {
+  it('stays linear as the reservation grows', () => {
+    // The 2026-08-09 soak reserved 77,236 slots for one wallet. With
+    // `Math.min(...outstanding)` on every completion that cost 1.611ms each —
+    // quadratic, ~124s of CPU to drain one wallet — against 0.012ms at 1,000.
+    // A pointer over the sorted reservation makes it flat.
+    const cost = (n: number): number => {
+      const cursors = openCursorStore({ path: ':memory:' });
+      try {
+        cursors.hold(WALLET);
+        cursors.reserve(WALLET, Array.from({ length: n }, (_, i) => i + 1));
+        const iterations = 2_000;
+        const started = process.hrtime.bigint();
+        for (let i = 1; i <= iterations; i += 1) cursors.set(WALLET, `sig-${i}`, i);
+        return Number(process.hrtime.bigint() - started) / 1e6 / iterations;
+      } finally {
+        cursors.close();
+      }
+    };
+
+    const small = cost(2_000);
+    const large = cost(80_000);
+    // 40x the reservation must not cost meaningfully more per completion. The
+    // bound is loose because this is a timing test on a shared machine; the
+    // regression it guards against was 130x, not 5x.
+    expect(large).toBeLessThan(Math.max(small, 0.01) * 5);
+  });
+});
