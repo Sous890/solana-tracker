@@ -642,6 +642,29 @@ export class Tracker extends EventEmitter {
         dirty: report.dirty,
       });
 
+      // BEFORE any network work, and deliberately not after it.
+      //
+      // Everything below this line can be slow or can hang: `stream.start()`
+      // gap fills every wallet before it connects, and warm fill is unbounded.
+      // On 2026-08-09 it did not finish inside 132 minutes, so the loops that
+      // used to be scheduled after it never started at all and the two
+      // positions this reconcile had just reported were left with no
+      // stop-loss, no take-profit and no `route-lost` for the whole run.
+      //
+      // The precondition is what the reconcile just found, not what the feed is
+      // doing. `ensureLoops()` below still starts it for a run that begins flat
+      // and acquires later, and `maybeStopLoops()` still tears it down only
+      // once idle AND flat.
+      if (report.openPositions.length > 0) this.ensurePriceLoop();
+
+      // Awaited, still — but only now that the exit monitor is scheduled, so a
+      // feed that never comes up delays entries without also blinding the book.
+      //
+      // The status flip stays BELOW this await on purpose. Guard gate 2 reads
+      // `status !== 'running'` to refuse entries, so while this is outstanding
+      // buys are refused `NOT_RUNNING` while sells — which never reach the
+      // entry gates — keep working. Flipping it early to make `start()` return
+      // sooner would open the entry gate onto a feed that is not there.
       await this.deps.stream.start();
 
       this.startedAt = this.now();
@@ -1011,12 +1034,31 @@ export class Tracker extends EventEmitter {
 
   // -- the loops ------------------------------------------------------------
 
+  /**
+   * The exit monitor. Its precondition is **positions exist**, not "the bot is
+   * running".
+   *
+   * Split out of `ensureLoops` because the two answer different questions.
+   * `priceTick` quotes the real exit for every open position and is what raises
+   * `route-lost`; a held position with no price loop has no stop-loss and no
+   * take-profit, and nothing is watching whether it can still be sold at all.
+   * None of that depends on the feed being up — it depends on holding something.
+   *
+   * Measured on 2026-08-09: `start()` awaited `stream.start()` before scheduling
+   * any loop, the gap fill did not finish, and **two open positions went 132
+   * minutes with no monitoring whatsoever**. The feed being slow is precisely
+   * when an operator is least able to react by hand, so it is the worst possible
+   * moment to also switch the alerts off.
+   */
+  private ensurePriceLoop(): void {
+    if (this.priceHandle !== undefined) return;
+    this.priceHandle = this.scheduler.setInterval(() => {
+      void this.priceTick();
+    }, this.priceIntervalMs);
+  }
+
   private ensureLoops(): void {
-    if (this.priceHandle === undefined) {
-      this.priceHandle = this.scheduler.setInterval(() => {
-        void this.priceTick();
-      }, this.priceIntervalMs);
-    }
+    this.ensurePriceLoop();
     if (this.screenHandle === undefined) {
       this.screenHandle = this.scheduler.setInterval(() => {
         void this.screenTick();

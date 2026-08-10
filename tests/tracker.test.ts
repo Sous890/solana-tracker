@@ -1612,3 +1612,88 @@ describe('intent resolution is total', () => {
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// Position monitoring survives a slow feed
+// ---------------------------------------------------------------------------
+
+describe('the exit monitor does not wait for the feed', () => {
+  /** A stream whose `start()` never settles — an unbounded warm gap fill. */
+  function hangingStream(h: Harness): void {
+    h.stream.start = () => new Promise<void>(() => undefined);
+  }
+
+  it('runs the price loop for positions the reconcile reported, while the feed hangs', async () => {
+    const h = open();
+    h.ledger.recordFill(buyFill());
+    h.ledger.recordFill(buyFill({ intentId: 'seed-buy-b', mint: MINT_B }));
+    hangingStream(h);
+
+    // Deliberately NOT awaited: the feed never comes up, so this never returns.
+    // That is the condition being tested, not a flaw in the test.
+    void h.tracker.start();
+    await new Promise((resolve) => setImmediate(resolve));
+
+    // Scheduled before the await, so the loop exists even though `start()` is
+    // still outstanding. Only the price loop — the screen and heartbeat loops
+    // are about the feed, and the feed is down.
+    expect(h.scheduler.active).toBe(1);
+
+    for (let interval = 0; interval < 3; interval += 1) {
+      h.scheduler.fire(0);
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+
+    // Before this change the loop was scheduled after `await stream.start()`,
+    // so two positions went 132 minutes on 2026-08-09 with no stop-loss, no
+    // take-profit and no route-lost.
+    expect(h.tracker.stats.priceTicks).toBeGreaterThan(0);
+  });
+
+  it('takes exits but refuses entries while the feed is still coming up', async () => {
+    const h = open();
+    h.ledger.recordFill(buyFill());
+    hangingStream(h);
+
+    void h.tracker.start();
+    await new Promise((resolve) => setImmediate(resolve));
+
+    // Gate 2 reads `status !== 'running'`, and the status flip stays below the
+    // await on purpose: opening the entry gate onto a feed that is not there
+    // would be worse than a delayed start.
+    expect(h.tracker.getState().status).not.toBe('running');
+    await expect(h.tracker.submit(buyIntent({ id: 'early-buy' }))).rejects.toMatchObject({
+      code: 'NOT_RUNNING',
+    });
+
+    // The exit still works, because a sell never reaches the entry gates. A bot
+    // that is holding must be able to get out even before its feed is up.
+    const fill = await h.tracker.submit({
+      id: 'early-exit',
+      side: 'sell',
+      mint: MINT_A,
+      amountTokens: 1_000_000_000n,
+      maxSlippageBps: 300,
+      reason: 'operator exit during startup',
+    });
+    expect(fill.side).toBe('sell');
+    expect(h.ledger.getPosition(MINT_A)?.state).toBe('closed');
+  });
+
+  it('still leaves the price loop running after a stop that held positions', async () => {
+    // Existing behaviour, asserted here against regression: the split of
+    // `ensurePriceLoop` out of `ensureLoops` must not change what survives a
+    // stop, because a stopped bot still holding is when the alerts matter most.
+    const h = open();
+    h.ledger.recordFill(buyFill());
+
+    await h.tracker.start();
+    await h.tracker.stop();
+
+    expect(h.scheduler.active).toBe(3);
+    const before = h.tracker.stats.priceTicks;
+    h.scheduler.fire(0);
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(h.tracker.stats.priceTicks).toBeGreaterThan(before);
+  });
+});
