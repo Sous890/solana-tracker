@@ -21,6 +21,7 @@ import { WalletStream } from '../src/adapters/walletStream.js';
 import type { RpcClient, SignatureEntry, StreamSocket } from '../src/adapters/walletStream.js';
 import type { ParsedTransactionWithMeta } from '../src/adapters/swapParser.js';
 import { openCursorStore } from '../src/db/cursors.js';
+import { signalOf } from '../src/services/strategyRunner.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const capture = JSON.parse(
@@ -45,6 +46,9 @@ function entries(count: number, startSlot = 100): SignatureEntry[] {
   }));
 }
 
+/** The clock every stream in this file is injected with. */
+const STREAM_NOW = 1_700_000_000_000;
+
 const tick = async (times = 12): Promise<void> => {
   for (let i = 0; i < times; i += 1) await new Promise((r) => setImmediate(r));
 };
@@ -55,6 +59,8 @@ interface SocketProbe {
   subscribed: Map<string, number>;
   closed: boolean;
   kill(): void;
+  /** Push a log notification on a wallet's subscription, as a validator does. */
+  deliverLive(signature: string, slot: number, wallet?: string): void;
 }
 
 /**
@@ -75,6 +81,15 @@ function probeSocket(firstId: number, killOnSubscribe?: number): SocketProbe {
   const probe: SocketProbe = {
     subscribed,
     closed: false,
+    deliverLive(signature, slot, wallet) {
+      const subscription =
+        wallet === undefined ? [...subscribed.values()][0] : subscribed.get(wallet);
+      onMessage(
+        JSON.stringify({
+          params: { subscription, result: { context: { slot }, value: { signature, err: null } } },
+        }),
+      );
+    },
     kill() {
       if (probe.closed) return;
       probe.closed = true;
@@ -141,6 +156,8 @@ function rig(options: {
   const sockets: SocketProbe[] = [];
   const swaps: TrackedSwap[] = [];
   const gates = new Map<string, { wait: Promise<void>; open: () => void }>();
+  /** Transactions for signatures that only ever arrive over the socket. */
+  const live = new Map<string, ParsedTransactionWithMeta>();
   let connects = 0;
 
   const cursors = openCursorStore({ path: ':memory:' });
@@ -161,7 +178,10 @@ function rig(options: {
       const gate = gates.get(signature);
       if (gate !== undefined) await gate.wait;
       const entry = history.find((e) => e.signature === signature);
-      return entry === undefined ? null : txFor(signature, entry.slot);
+      // A live notification names a signature the backlog has never heard of —
+      // that is the whole point of it being live.
+      if (entry === undefined) return live.get(signature) ?? null;
+      return txFor(signature, entry.slot);
     },
   };
 
@@ -175,6 +195,14 @@ function rig(options: {
         throw new Error('WebSocket connect failed: errored before opening');
       }
       const probe = probeSocket(1_000 * connects, options.killOnSubscribe?.(sockets.length));
+      const push = probe.deliverLive.bind(probe);
+      probe.deliverLive = (signature, slot, wallet) => {
+        const tx = txFor(signature, slot);
+        // A block that just landed. `blockTime` is in SECONDS.
+        tx.blockTime = Math.floor(STREAM_NOW / 1_000);
+        live.set(signature, tx);
+        push(signature, slot, wallet);
+      };
       sockets.push(probe);
       return probe.socket;
     },
@@ -441,5 +469,182 @@ describe('barrier cost at soak scale', () => {
     // bound is loose because this is a timing test on a shared machine; the
     // regression it guards against was 130x, not 5x.
     expect(large).toBeLessThan(Math.max(small, 0.01) * 5);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Connect before filling
+// ---------------------------------------------------------------------------
+
+/**
+ * The success criterion for the reorder, and the cases it creates.
+ *
+ * Not "the socket opens earlier" — that is a means. The criterion is that a swap
+ * happening while the startup fill is running can become a trade, which requires
+ * the socket live during the fill AND `running` bound to the socket rather than
+ * to `start()` returning (462fd87).
+ */
+describe('startup connects before it fills', () => {
+  it('emits a live swap DURING the startup fill, fresh enough to trade', async () => {
+    const full = entries(4);
+    const r = rig({ history: full });
+    try {
+      // Blocked on the FIRST entry, so nothing from the backlog has completed
+      // and the fill is unambiguously still running.
+      r.hold('sig-1');
+
+      const started = r.stream.start();
+      await tick();
+
+      // The socket exists and is subscribed while the fill is still running.
+      expect(r.sockets).toHaveLength(1);
+      expect(r.sockets[0]!.subscribed.size).toBe(1);
+      expect(r.swaps).toHaveLength(0);
+
+      // A wallet trades right now. Slot far above the backlog.
+      r.sockets[0]!.deliverLive('sig-live', 900);
+      await tick(20);
+
+      // Before the reorder there was no socket at all at this moment, so this
+      // swap did not exist. It is emitted while the fill is still blocked.
+      const live = r.swaps.find((swap) => swap.signature === 'sig-live');
+      expect(live, 'live swap during the startup fill').toBeDefined();
+      expect(live?.source).toBe('live');
+
+      // And it is FRESH as the freshness gate computes it — not merely emitted.
+      // `signalOf` is the exact function `StrategyRunner` stamps intents with
+      // and `guards.ts` gate 3 reads, so this is the property that decides
+      // whether the swap can become a trade rather than a STALE_SIGNAL row.
+      // Well inside maxSignalAgeMs, which is 15s.
+      expect(signalOf(live!, STREAM_NOW).signalAgeMs).toBeLessThan(15_000);
+      expect(live?.observedAt).toBe(STREAM_NOW);
+
+      r.release('sig-1');
+      await started;
+      await tick(20);
+    } finally {
+      r.close();
+    }
+  });
+
+  it('holds every cursor before the first live delivery can write one', async () => {
+    // The blanket hold is taken for ALL wallets before the loop, so wallet 3's
+    // cursor cannot advance from a live delivery while wallet 1 is filling.
+    const other = 'HSsJjkHrxezZ1SdhgdivhDGXbxANicWbKvKsVtrMrJvG';
+    const third = 'AgiGpUAF25B7NL9u8byDcptPcYWi4eFU4kjtcRtaMmdQ';
+    const full = entries(4);
+    const r = rig({ wallets: [WALLET, other, third], history: full });
+    try {
+      r.cursors.set(third, 'sig-1', 101);
+      r.hold('sig-2');
+
+      const started = r.stream.start();
+      await tick();
+
+      // Wallet 3 is twelve wallets away from its own fill, and a live delivery
+      // for it lands now. Its cursor must not move past the window it has not
+      // replayed — `until:` returns only what is NEWER, so that window would be
+      // skipped with no record.
+      r.sockets[0]!.deliverLive('sig-4', 104, third);
+      await tick(20);
+      expect(r.cursors.get(third)?.lastSignature).toBe('sig-1');
+
+      r.release('sig-2');
+      await started;
+      await tick(20);
+    } finally {
+      r.close();
+    }
+  });
+
+  it('emits one swap when live and gap fill race the same signature, either order', async () => {
+    // `inFlight` covers the whole fetch window and both paths converge on
+    // `handle`, so whichever arrives second is dropped. Tested under the new
+    // interleaving, where the two genuinely overlap for the first time.
+    for (const liveFirst of [true, false]) {
+      const full = entries(3);
+      const r = rig({ history: full });
+      try {
+        r.hold('sig-1'); // the fill blocks on its FIRST entry
+        const started = r.stream.start();
+        await tick();
+
+        if (liveFirst) {
+          r.sockets[0]!.deliverLive('sig-2', 102);
+          await tick(20);
+          r.release('sig-1');
+        } else {
+          r.release('sig-1');
+          await tick(4);
+          r.sockets[0]!.deliverLive('sig-2', 102);
+        }
+        await started;
+        await tick(20);
+
+        expect(r.swaps.filter((swap) => swap.signature === 'sig-2')).toHaveLength(1);
+      } finally {
+        r.close();
+      }
+    }
+  });
+
+  it('asks for a reconnect when the socket dies during the startup fill', async () => {
+    // Not representable before this commit — session 25 recorded that there was
+    // no socket to kill during the initial fill. There is now, and `start()`
+    // has no retry loop of its own, so it must ask for one.
+    const full = entries(4);
+    const r = rig({ history: full });
+    try {
+      r.hold('sig-2');
+      const started = r.stream.start();
+      await tick();
+
+      r.sockets[0]!.kill();
+      await tick();
+
+      r.release('sig-2');
+      await started;
+      await tick(30);
+
+      expect(r.sockets.length).toBeGreaterThanOrEqual(2);
+      expectRecovered(r);
+    } finally {
+      r.close();
+    }
+  });
+
+  it('asks for a reconnect when the socket dies between connecting and the first hold', async () => {
+    // Killed on the first subscribe, before the server replies — so the socket
+    // died in the window the hold-loop argument is about.
+    const full = entries(3);
+    const r = rig({ history: full, killOnSubscribe: (index) => (index === 0 ? 1 : undefined) });
+    try {
+      await r.stream.start();
+      await tick(40);
+      expectRecovered(r);
+    } finally {
+      r.close();
+    }
+  });
+
+  it('releases every hold when the fill throws with the socket live', async () => {
+    const full = entries(4);
+    const r = rig({ history: full });
+    let thrown = 0;
+    r.stream.on('swap', () => {
+      thrown += 1;
+      if (thrown === 1) throw new Error('listener exploded with the socket up');
+    });
+    try {
+      await expect(r.stream.start()).rejects.toThrow('listener exploded');
+      await tick(20);
+
+      // The finally releases regardless. A leaked hold would freeze the cursor
+      // for the life of the process while the socket kept looking healthy.
+      r.cursors.set(WALLET, 'sig-live', 900);
+      expect(r.cursors.get(WALLET)?.lastSlot).toBe(900);
+    } finally {
+      r.close();
+    }
   });
 });

@@ -562,12 +562,40 @@ export class WalletStream extends EventEmitter {
 
   // -- lifecycle ------------------------------------------------------------
 
+  /**
+   * Connect first, then backfill — the same order as `reconnect()`.
+   *
+   * This used to fill and then connect, which meant the whole startup backlog
+   * was replayed with no socket: session 25 spent 132 minutes filling and never
+   * connected at all, and every swap that happened in that window was missed
+   * outright rather than merely late.
+   *
+   * `MAX_WARM_FILL` is what makes this safe to invert. The startup fill is
+   * bounded at 100 entries per wallet, so the socket is live for a ceiling of
+   * 1,300 serial fetches — ~4.2 minutes at the measured 194ms mean — rather than
+   * for an open-ended replay. **Every claim in `gapFillAll` about a live socket
+   * during the fill is scoped by that bound; raising it puts them all back in
+   * play.**
+   *
+   * A failed connect hands off to the reconnect chain and STILL backfills.
+   * Returning early would skip the backlog entirely on the one path where the
+   * process has most likely been down the longest.
+   */
   async start(): Promise<void> {
     this.running = true;
+    if (!(await this.connectOnce())) this.beginReconnect();
+
     // Gap fill on startup as well as on reconnect: the process may have been
     // down for any length of time, and the cursor is the only record of that.
     await this.gapFillAll();
-    if (!(await this.connectOnce())) this.beginReconnect();
+
+    // The socket can die inside the fill — that window is minutes long now, and
+    // this is the same lost-wakeup class 6ae46b0 fixed on the reconnect path.
+    // `reconnect()` handles it by continuing its retry loop; `start()` has no
+    // loop, so it must ask for one. Returning with no socket and no chain in
+    // flight would leave the process permanently silent with the feed simply
+    // looking quiet.
+    if (this.running && this.socket === undefined) this.beginReconnect();
   }
 
   /**
@@ -582,9 +610,30 @@ export class WalletStream extends EventEmitter {
    * advance 13's cursor past the window 13 is about to replay, and `until:`
    * returns only what is NEWER, so that window is skipped. No crash required.
    *
-   * `start()` is not exposed to that — there is no socket yet — but it takes the
-   * same hold, because the two paths differing in a property this subtle is how
-   * the next person reintroduces it.
+   * `start()` is exposed to exactly the same thing since it began connecting
+   * first. Both paths now take the identical hold, which is what makes the two
+   * orderings one code path rather than two with a subtle difference between
+   * them.
+   *
+   * ── THE WINDOW BETWEEN CONNECTING AND THE HOLD BEING TAKEN ────────────────
+   *
+   * A notification can arrive after `connectOnce()` resolves and before the hold
+   * loop below runs. `reconnect()` has relied on that window being harmless
+   * since it was written, without ever saying why, so: it is harmless because a
+   * live notification cannot write a cursor synchronously. `onMessage` parses
+   * and calls `enqueue`, which pushes and calls `void this.drain()`; `drain`
+   * awaits `handle`, which awaits `rpc.getTransaction` — measured at a 158ms p50
+   * and a 194ms mean — before `dispatch` reaches `cursors.set`. The hold loop
+   * below is synchronous and runs to completion in the same tick that called it.
+   * So the earliest possible cursor write from a notification arriving in that
+   * window is one full macrotask plus a network round trip after the hold is
+   * already in place.
+   *
+   * That is an argument from the shape of the code rather than a guarantee: it
+   * would stop holding if anything between `onMessage` and `cursors.set` ever
+   * became synchronous. Nothing on that path can be, since it is defined by a
+   * fetch, but it is the assumption to check first if a cursor is ever seen
+   * moving before its hold.
    */
   private async gapFillAll(): Promise<void> {
     const wallets = this.deps.wallets;
