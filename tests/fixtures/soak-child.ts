@@ -55,7 +55,14 @@ const WALLET = '7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU';
 const BUY_OUT = 1_000_000_000n;
 
 class FakeStream extends EventEmitter implements WalletFeed {
-  async start(): Promise<void> {}
+  /**
+   * Emits `connected`, because `WalletStream.start()` does. The tracker's
+   * `running` status is bound to that event, so a fake that omits it models a
+   * feed that never comes up.
+   */
+  async start(): Promise<void> {
+    this.emit('connected', { at: Date.now() });
+  }
   stop(): void {}
 }
 class FakeScreener extends EventEmitter implements HeldPositionScreener {

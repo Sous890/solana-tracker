@@ -37,7 +37,14 @@ const AT = 1_700_000_000_000;
 const QUOTE_DELAY_MS = 750;
 
 class NoopStream extends EventEmitter implements WalletFeed {
-  async start(): Promise<void> {}
+  /**
+   * Emits `connected`, because `WalletStream.start()` does. The tracker's
+   * `running` status is bound to that event, so a fake that omits it models a
+   * feed that never comes up.
+   */
+  async start(): Promise<void> {
+    this.emit('connected', { at: Date.now() });
+  }
   stop(): void {}
 }
 

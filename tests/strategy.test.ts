@@ -459,7 +459,14 @@ describe('equation stub', () => {
 // ---------------------------------------------------------------------------
 
 class FakeStream extends EventEmitter implements WalletFeed {
-  async start(): Promise<void> {}
+  /**
+   * Emits `connected`, because `WalletStream.start()` does. The tracker's
+   * `running` status is bound to that event, so a fake that omits it models a
+   * feed that never comes up.
+   */
+  async start(): Promise<void> {
+    this.emit('connected', { at: Date.now() });
+  }
   stop(): void {}
 }
 class FakeScreener extends EventEmitter implements HeldPositionScreener {

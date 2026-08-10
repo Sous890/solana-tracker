@@ -68,9 +68,18 @@ class FakeStream extends EventEmitter implements WalletFeed {
     return this.heartbeatTearsDown;
   }
 
+  /**
+   * Emits `connected` on success, because `WalletStream.connectOnce()` does and
+   * the tracker's `running` status is bound to it. A fake that omits it models
+   * a feed that never comes up — which is what `startError` and
+   * `withholdConnected` are for.
+   */
+  withholdConnected = false;
+
   async start(): Promise<void> {
     if (this.startError !== undefined) throw this.startError;
     this.starts += 1;
+    if (!this.withholdConnected) this.emit('connected', { at: Date.now() });
   }
 
   stop(): void {
@@ -1695,5 +1704,80 @@ describe('the exit monitor does not wait for the feed', () => {
     h.scheduler.fire(0);
     await new Promise((resolve) => setImmediate(resolve));
     expect(h.tracker.stats.priceTicks).toBeGreaterThan(before);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// `running` means the socket is live
+// ---------------------------------------------------------------------------
+
+describe('running is bound to the feed, not to start() returning', () => {
+  it('stays out of running when start() resolves without a socket', async () => {
+    // `WalletStream.start()` RESOLVES when the initial connect fails — it hands
+    // off to the reconnect chain and returns. Bound to that, the bot went
+    // `running` with no socket at all, which is an open entry gate on a feed
+    // that is not there.
+    const h = open();
+    h.stream.withholdConnected = true;
+
+    await h.tracker.start();
+
+    expect(h.stream.starts).toBe(1);
+    expect(h.tracker.getState().status).not.toBe('running');
+    await expect(h.tracker.submit(buyIntent())).rejects.toMatchObject({
+      code: 'NOT_RUNNING',
+    });
+  });
+
+  it('promotes when the feed comes up later, on the reconnect chain', async () => {
+    const h = open();
+    h.stream.withholdConnected = true;
+    await h.tracker.start();
+    expect(h.tracker.getState().status).not.toBe('running');
+
+    // The reconnect chain emits this on every successful connect, not only on
+    // the first one.
+    h.stream.emit('connected', { at: Date.now() });
+
+    expect(h.tracker.getState().status).toBe('running');
+  });
+
+  it('does not let a socket coming back promote a bot that was stopped', async () => {
+    const h = open();
+    await h.tracker.start();
+    expect(h.tracker.getState().status).toBe('running');
+
+    await h.tracker.stop();
+    expect(h.tracker.getState().status).toBe('idle');
+
+    // A reconnect landing after teardown must not restart the run.
+    h.stream.emit('connected', { at: Date.now() });
+
+    expect(h.tracker.getState().status).toBe('idle');
+  });
+
+  it('still stops a run whose connect never succeeded', async () => {
+    // `stop()` used to return early on `status === 'idle'`. That is no longer
+    // sufficient: a run whose connect failed sits at idle with a reconnect
+    // chain in flight, and returning would leave the stream retrying for the
+    // life of the process with `wantRunning` still set.
+    const h = open();
+    h.stream.withholdConnected = true;
+    await h.tracker.start();
+
+    await h.tracker.stop();
+
+    expect(h.stream.stops).toBe(1);
+    h.stream.emit('connected', { at: Date.now() });
+    expect(h.tracker.getState().status).toBe('idle');
+  });
+
+  it('records the connect separately from the backfill', async () => {
+    // Two halves of startup with very different magnitudes once start()
+    // connects before it fills. One interval today; two after.
+    const h = open();
+    await h.tracker.start();
+
+    expect(h.events.filter((event) => event.type === 'stream-connected')).toHaveLength(1);
   });
 });

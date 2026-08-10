@@ -182,6 +182,12 @@ export type TrackerEventName =
   | 'stream-disconnected'
   /** The wallet websocket came back, with the attempt count. */
   | 'stream-reconnected'
+  /**
+   * A socket is open and subscribed. Separately timestamped from the backfill
+   * that follows it, because once `start()` connects before it fills those are
+   * the two halves of startup and they have very different magnitudes.
+   */
+  | 'stream-connected'
   /** A gap fill completed, with how many signatures it recovered. */
   | 'stream-gap-filled'
   /**
@@ -471,6 +477,14 @@ export class Tracker extends EventEmitter {
   private priceHandle: unknown;
   private screenHandle: unknown;
   private heartbeatHandle: unknown;
+  /**
+   * The operator has asked for a run and has not asked for it to stop.
+   *
+   * Distinct from `status === 'running'`, which additionally requires a live
+   * socket. This is what makes a connect that succeeds on the third attempt
+   * promote the bot, while a stray `connected` after `stop()` does not.
+   */
+  private wantRunning = false;
   private priceTickRunning = false;
   private screenTickRunning = false;
 
@@ -555,6 +569,10 @@ export class Tracker extends EventEmitter {
     });
     deps.stream.on('reconnected', (payload: unknown) => {
       this.record('stream-reconnected', { ...(payload as object), at: this.now() });
+    });
+    deps.stream.on('connected', (payload: unknown) => {
+      this.record('stream-connected', { ...(payload as object), at: this.now() });
+      this.onConnected();
     });
     deps.stream.on('history-skipped', (payload: unknown) => {
       this.record('stream-history-skipped', payload);
@@ -666,18 +684,27 @@ export class Tracker extends EventEmitter {
       // once idle AND flat.
       if (report.openPositions.length > 0) this.ensurePriceLoop();
 
+      // Set before the await, because the promotion happens on the stream's
+      // `connected` event and that can fire while this call is outstanding.
+      this.wantRunning = true;
+
       // Awaited, still — but only now that the exit monitor is scheduled, so a
       // feed that never comes up delays entries without also blinding the book.
       //
-      // The status flip stays BELOW this await on purpose. Guard gate 2 reads
-      // `status !== 'running'` to refuse entries, so while this is outstanding
-      // buys are refused `NOT_RUNNING` while sells — which never reach the
-      // entry gates — keep working. Flipping it early to make `start()` return
-      // sooner would open the entry gate onto a feed that is not there.
+      // `running` is NOT set here. It is bound to the socket being live — see
+      // `onConnected`. Guard gate 2 reads `status !== 'running'` to refuse
+      // entries, so what that gate is really asking is "is the feed up", and
+      // answering it with "`start()` returned" answered a different question:
+      // this call resolves even when `connectOnce()` failed and handed off to
+      // the reconnect chain, which promoted the bot to `running` with no socket
+      // at all and an open entry gate.
       await this.deps.stream.start();
 
       this.startedAt = this.now();
-      this.setStatus('running');
+      // Independent of the socket, deliberately. The screen loop re-screens held
+      // positions and the heartbeat drives silence detection; both are about
+      // this process being up rather than about the feed, so a connect that
+      // failed must not also cost the monitoring.
       this.ensureLoops();
 
       return report;
@@ -693,11 +720,19 @@ export class Tracker extends EventEmitter {
    * throwing, and why the monitoring loops outlive it.
    */
   async stop(): Promise<void> {
-    if (this.status === 'idle') return;
+    // `status === 'idle'` alone is no longer sufficient to mean "not running".
+    // Since `running` was bound to the socket, a run whose initial connect
+    // failed sits at `idle` with a reconnect chain in flight — and returning
+    // here would leave the stream retrying for the life of the process and
+    // `wantRunning` set, so the next `connected` would silently promote a bot
+    // the operator had stopped.
+    if (this.status === 'idle' && !this.wantRunning) return;
     if (this.stopping !== undefined) return this.stopping;
 
     this.stopping = (async () => {
       try {
+        // Cleared first, so a `connected` racing this teardown cannot promote.
+        this.wantRunning = false;
         // First, and before any await: `status !== 'running'` is what guard gate
         // 2 reads, so an entry racing this call is already refused. Sells are
         // untouched — `guardSell` never looks at status.
@@ -1059,6 +1094,27 @@ export class Tracker extends EventEmitter {
    * when an operator is least able to react by hand, so it is the worst possible
    * moment to also switch the alerts off.
    */
+  /**
+   * The feed came up. Promote the run, if a run is what was asked for.
+   *
+   * `running` means "a socket is live and subscribed", not "`start()` finished
+   * trying". The difference is load-bearing because guard gate 2 refuses entries
+   * on `status !== 'running'`: under the old binding a failed initial connect
+   * still resolved `stream.start()`, so the bot went `running` with no socket at
+   * all and an open entry gate. Only the absence of any swaps to act on kept it
+   * from trading on a feed that was not there.
+   *
+   * Gated on `wantRunning` rather than on status alone, because the reconnect
+   * chain emits this on every successful connect — including ones that land
+   * after `stop()` has begun, and a stopped bot must not be restarted by its own
+   * socket coming back.
+   */
+  private onConnected(): void {
+    if (!this.wantRunning) return;
+    if (this.status === 'running') return;
+    this.setStatus('running');
+  }
+
   private ensurePriceLoop(): void {
     if (this.priceHandle !== undefined) return;
     this.priceHandle = this.scheduler.setInterval(() => {

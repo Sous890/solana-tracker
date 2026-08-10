@@ -35,8 +35,14 @@ class FakeStream extends EventEmitter implements WalletFeed {
   constructor(private readonly wallets: readonly string[]) {
     super();
   }
+  /**
+   * Emits `connected`, because `WalletStream.start()` does. The tracker's
+   * `running` status is bound to that event, so a fake that omits it models a
+   * feed that never comes up.
+   */
   async start(): Promise<void> {
     this.subscribes.push([...this.wallets]);
+    this.emit('connected', { at: Date.now() });
   }
   stop(): void {}
 }

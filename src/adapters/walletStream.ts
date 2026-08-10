@@ -411,6 +411,20 @@ export interface QueueOverflowEvent {
 }
 
 /**
+ * A socket is open and every subscribe has been sent.
+ *
+ * Distinct from `reconnected`, deliberately. That one means "an outage is over"
+ * and is emitted after the backfill; this one means "the feed is live" and is
+ * emitted the moment it is true, on the first connect as well as on every
+ * subsequent one. The tracker's `running` status is bound to this rather than to
+ * `start()` returning, so `running` cannot mean "we finished trying" — it means
+ * a socket exists and is subscribed.
+ */
+export interface ConnectedEvent {
+  at: UnixMillis;
+}
+
+/**
  * Why the stream is not connected.
  *
  * `phase` exists because these two were indistinguishable downstream and got
@@ -647,6 +661,13 @@ export class WalletStream extends EventEmitter {
           }),
         );
       }
+
+      // The socket is up and every subscribe has been sent. Emitted separately
+      // from `reconnected`, which fires only after the backfill and only on the
+      // reconnect path — this is "the feed is live", which is a different fact
+      // and, once `start()` connects before it fills, happens at a very
+      // different time from "the backfill finished".
+      this.emit('connected', { at: this.deps.now() } satisfies ConnectedEvent);
       return true;
     } catch (error) {
       this.emit('error', error as Error);
