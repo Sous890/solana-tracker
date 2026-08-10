@@ -7,13 +7,20 @@ import type { TrackedSwap } from '../src/core/types.js';
 import {
   MAX_COLD_FILL,
   MAX_IN_FLIGHT,
+  MAX_WARM_FILL,
 
   SILENCE_TIMEOUT_MS,
   SeenSignatures,
   WalletStream,
   orderOldestFirst,
 } from '../src/adapters/walletStream.js';
-import type { RpcClient, SignatureEntry, StreamSocket } from '../src/adapters/walletStream.js';
+import type {
+  GapFilledEvent,
+  HistorySkippedEvent,
+  RpcClient,
+  SignatureEntry,
+  StreamSocket,
+} from '../src/adapters/walletStream.js';
 import type { ParsedTransactionWithMeta } from '../src/adapters/swapParser.js';
 import { openCursorStore } from '../src/db/cursors.js';
 import type { CursorStore } from '../src/db/cursors.js';
@@ -1738,5 +1745,153 @@ describe('feed events carry enough to be measured later', () => {
 
     stream.stop();
     cursors.close();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The warm bound
+// ---------------------------------------------------------------------------
+
+describe('bounded warm gap fill', () => {
+  function warmHarness(history: SignatureEntry[], store?: CursorStore) {
+    const { rpc } = fakeRpc({ history });
+    const cursors = store ?? openCursorStore({ path: ':memory:' });
+    const stream = new WalletStream({
+      wallets: [WALLET],
+      rpc,
+      cursors,
+      connect: async () => fakeSocket().socket,
+      now: () => 1_700_000_000_000,
+      sleep: async () => undefined,
+      random: () => 0,
+    });
+    const swaps: TrackedSwap[] = [];
+    const gapFills: GapFilledEvent[] = [];
+    const skipped: HistorySkippedEvent[] = [];
+    stream.on('swap', (swap: TrackedSwap) => swaps.push(swap));
+    stream.on('gap-filled', (event: GapFilledEvent) => gapFills.push(event));
+    stream.on('history-skipped', (event: HistorySkippedEvent) => skipped.push(event));
+    stream.on('error', () => undefined);
+    return { stream, cursors, swaps, gapFills, skipped };
+  }
+
+  it('leaves a warm fill under the bound completely alone', async () => {
+    // entries(N) is sig-N at slot 100+N down to sig-1 at slot 101.
+    const history = entries(MAX_WARM_FILL);
+    const h = warmHarness(history);
+    try {
+      h.cursors.set(WALLET, 'sig-1', 101);
+      await h.stream.start();
+
+      // 99 entries newer than the cursor, which is under the bound.
+      expect(h.gapFills[0]?.count).toBe(MAX_WARM_FILL - 1);
+      expect(h.skipped).toHaveLength(0);
+      expect(h.gapFills[0]?.truncated).toBe(false);
+      expect(h.cursors.get(WALLET)?.lastSignature).toBe(`sig-${MAX_WARM_FILL}`);
+    } finally {
+      h.stream.stop();
+      h.cursors.close();
+    }
+  });
+
+  it('truncates over the bound, lands the cursor on the truncation point, and skips no more', async () => {
+    const total = MAX_WARM_FILL + 40;
+    const history = entries(total);
+    const h = warmHarness(history);
+    try {
+      h.cursors.set(WALLET, 'sig-1', 101);
+      await h.stream.start();
+
+      // 139 entries were newer than the cursor; the newest 100 are kept.
+      const skippedCount = total - 1 - MAX_WARM_FILL;
+      expect(h.skipped).toHaveLength(1);
+      expect(h.skipped[0]).toMatchObject({
+        wallet: WALLET,
+        count: skippedCount,
+        bound: MAX_WARM_FILL,
+      });
+
+      // The abandoned window is the OLDEST entries above the cursor: sig-2
+      // upward. sig-N sits at slot 100+N.
+      expect(h.skipped[0]?.fromSlot).toBe(102);
+      expect(h.skipped[0]?.toSlot).toBe(101 + skippedCount);
+
+      // Nothing in the skipped window was emitted.
+      const emitted = new Set(h.swaps.map((swap) => swap.signature));
+      for (let i = 2; i <= 1 + skippedCount; i += 1) {
+        expect(emitted.has(`sig-${i}`), `sig-${i} was in the skipped window`).toBe(false);
+      }
+      // Everything from the truncation point up was.
+      expect(h.swaps).toHaveLength(MAX_WARM_FILL);
+
+      // And the cursor ends at the tip, having passed through the truncation
+      // point rather than jumping over the kept entries.
+      expect(h.cursors.get(WALLET)?.lastSignature).toBe(`sig-${total}`);
+    } finally {
+      h.stream.stop();
+      h.cursors.close();
+    }
+  });
+
+  it('records the truncation point durably even if nothing after it is handled', async () => {
+    // A crash immediately after the skip must not re-attempt the window. The
+    // cursor write happens before any entry is handled, so a store inspected at
+    // that moment already names the truncation point.
+    const total = MAX_WARM_FILL + 10;
+    const history = entries(total);
+    const { rpc } = fakeRpc({ history });
+    const cursors = openCursorStore({ path: ':memory:' });
+    const seen: Array<string | undefined> = [];
+    const stream = new WalletStream({
+      wallets: [WALLET],
+      rpc,
+      cursors,
+      connect: async () => fakeSocket().socket,
+      now: () => 1_700_000_000_000,
+      sleep: async () => undefined,
+      random: () => 0,
+    });
+    stream.on('history-skipped', () => {
+      seen.push(cursors.get(WALLET)?.lastSignature);
+    });
+    stream.on('error', () => undefined);
+    try {
+      cursors.set(WALLET, 'sig-1', 101);
+      await stream.start();
+      // At the instant the gap was announced, the cursor already named the
+      // truncation point — the newest abandoned signature.
+      expect(seen).toEqual([`sig-${total - MAX_WARM_FILL}`]);
+    } finally {
+      stream.stop();
+      cursors.close();
+    }
+  });
+
+  it('distinguishes a cold truncation from a warm one by event type', async () => {
+    const history = entries(MAX_COLD_FILL + 30);
+
+    const cold = warmHarness(history);
+    try {
+      // No cursor at all.
+      await cold.stream.start();
+      expect(cold.gapFills[0]?.truncated).toBe(true);
+      expect(cold.skipped).toHaveLength(0);
+    } finally {
+      cold.stream.stop();
+      cold.cursors.close();
+    }
+
+    const warm = warmHarness(history);
+    try {
+      warm.cursors.set(WALLET, 'sig-1', 101);
+      await warm.stream.start();
+      expect(warm.skipped).toHaveLength(1);
+      // The flag stays FALSE on a warm truncation: the event type is the
+      // discriminator, so neither fact has to be read off the other's flag.
+      expect(warm.gapFills[0]?.truncated).toBe(false);
+    } finally {
+      warm.stream.stop();
+      warm.cursors.close();
+    }
   });
 });

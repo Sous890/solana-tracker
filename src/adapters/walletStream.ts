@@ -101,6 +101,106 @@ export const BACKOFF_MAX_MS = 30_000;
 /** Bound on history replayed when the cursor is unusable. */
 export const MAX_COLD_FILL = 100;
 /**
+ * Bound on history replayed when the cursor IS usable.
+ *
+ * ── DERIVED IN SESSION 25, AGAINST ENTRY LATENCY RATHER THAN SAFETY ───────
+ *
+ * This used to be unbounded, because the `MAX_COLD_FILL` check is gated on
+ * `cursor === undefined`. Session 25's soak paid for that: one wallet ran 20,045
+ * serial fetches with 77,236 slots reserved and was still going at shutdown, and
+ * the socket never connected at all across a 132.3-minute window.
+ *
+ * **What this bound is for, since d40fc56.** `ensurePriceLoop()` now runs before
+ * `stream.start()`, so a long fill no longer strands held positions — stop-loss,
+ * take-profit and `route-lost` all survive it. What it does NOT survive is entry
+ * latency: `start()` still does not return while a warm fill runs, so `status`
+ * stays `idle`, guard gate 2 refuses every buy, and a 132-minute fill is still
+ * 132 minutes of zero entries. That is the cost this bound buys down.
+ *
+ * ── 1. THE PER-WALLET BOUND, AND THE DECAY CLAIM BEHIND IT ────────────────
+ *
+ * 100 entries. The claim is that replayed history has **no** trading value
+ * beyond the first few seconds, and the system already asserts this elsewhere:
+ * `maxSignalAgeMs` is 15,000ms, and guard gate 3 refuses any intent whose
+ * originating swap is older than that. `MirrorStrategy` deliberately does not
+ * filter on age itself, so a stale replayed swap becomes a `STALE_SIGNAL`
+ * rejection rather than a trade. Gap fill replays history at least as old as the
+ * downtime, so after even a one-minute outage every replayed entry is already
+ * past the gate. Depth beyond that is corpus and cursor continuity, not alpha.
+ *
+ * The alpha-decay harness (handoff 16) measures the shape: mean forward return
+ * by entry delay, **n=119 round trips sampled over 20 days on one wallet**:
+ *
+ *     delay      0s     15s     30s     60s    120s
+ *     mean    16.24%  10.70%   9.08%   6.45%   5.82%
+ *
+ * Down 34% by the 15s gate and 60% by 60s. It is one wallet and 119 trips, so it
+ * establishes the direction and rough magnitude, not a precise half-life — but
+ * every candidate bound sits far to the right of the 15s cliff, so the choice is
+ * not sensitive to that imprecision.
+ *
+ * 100 is therefore chosen from COST, with the decay curve establishing only that
+ * the benefit side is flat. It matches `MAX_COLD_FILL` deliberately: the reason
+ * cold fill is capped — "never replay unbounded history into a live strategy" —
+ * applies identically whether or not a cursor happens to exist, and the two
+ * differing was an oversight in a guard condition rather than a decision.
+ *
+ * Coverage, measured over **n=842 `gap-filled` events across all 12 session
+ * files** (2026-08-04 to 2026-08-09): p50 16, p75 45, p90 100, p99 675, max
+ * 7,822. **90.7% of fills are already at or under 100** and see no change at
+ * all; the bound bites on the remaining 9.3%.
+ *
+ * ── 2. THE AGGREGATE STARTUP COST, WHICH IS STILL LARGE ───────────────────
+ *
+ * `gapFillAll()` is serial across 13 wallets, so the worst case is 13 x 100 =
+ * **1,300 fetches before `start()` returns**. At the measured mean gap-fill
+ * fetch of 194ms (p50 158ms, p90 206ms, **n=47,684**) that is **~4.2 minutes**,
+ * or ~4.5 at p90.
+ *
+ * Four minutes of zero entries is not a good number and is not presented as one.
+ * At the measured live arrival rate of 1.40 swaps/min across all 13 wallets it
+ * is roughly six missed signals per cold start. It is ~31x better than the
+ * observed 132-minute failure, and it is bounded rather than open-ended, but the
+ * fix that actually removes it is concurrency across wallets, not a smaller
+ * per-wallet cap. **This number belongs in the re-soak gate**, not buried here:
+ * a re-soak should expect ~4 minutes of startup blindness, and if it sees much
+ * more the bound is not working.
+ *
+ * ── 3. THE IMPLIED CEILING ON `Barrier.peakOutstanding` ───────────────────
+ *
+ * `reserve()` is called once per wallet with exactly the entries about to be
+ * handled, so a bounded fill bounds the reservation: **peakOutstanding <= 100**,
+ * against 77,236 observed. That matters because the barrier was quadratic in the
+ * reservation until 804724b — at 77,236 it cost 1.611ms per completion, ~124s of
+ * CPU for one wallet. It is linear now, but this bound means the pathological
+ * input can no longer be constructed at all.
+ *
+ * `MAX_DEFERRED` stays at 4,096, now ~40x the ceiling it guards. Left alone
+ * deliberately: deferral is driven by live deliveries landing above the barrier,
+ * not by reservation size, and prompt 16 will make those land during the fill
+ * for the first time. At 1.40 swaps/min over a ~4 minute fill that is single
+ * digits, so 4,096 is wildly slack — but re-deriving a constant whose input is
+ * about to change, inside a commit that is meant to be one change, would be
+ * guessing twice. It is oversized, harmless, and flagged rather than adjusted.
+ *
+ * ── ORDER-INDEPENDENCE (prompt 16 moves `connectOnce` ahead of this) ──────
+ *
+ * The truncation path is order-independent and does not assume the socket is
+ * down. It reads only the cursor and the paged entries, and the cursor write
+ * that records the skip happens **after** `reserve()`, so it lands below the
+ * barrier and persists immediately while a concurrent live delivery for the same
+ * wallet — which sits above the barrier — stays deferred. A live delivery cannot
+ * therefore be mistaken for the truncation point, and the truncation point
+ * cannot overwrite a newer live position.
+ *
+ * The one thing that does change under prompt 16: the skipped window will be
+ * computed while new signatures are still arriving, so `toSlot` becomes "newest
+ * skipped at the moment of paging" rather than "newest skipped, full stop".
+ * That is already true of any gap fill and is why the event carries explicit
+ * slots instead of a count alone.
+ */
+export const MAX_WARM_FILL = 100;
+/**
  * Entries retained by the seen set, which is keyed on `(wallet, signature)`.
  *
  * ── RE-DERIVED IN SESSION 23, AND THE OLD ARITHMETIC WAS WRONG ────────────
@@ -331,8 +431,50 @@ export interface DisconnectedEvent {
 export interface GapFilledEvent {
   wallet: Address;
   count: number;
-  /** True when the cursor was unusable and history was capped at MAX_COLD_FILL. */
+  /**
+   * True when the cursor was unusable and history was capped at
+   * `MAX_COLD_FILL`. **Cold truncation only.**
+   *
+   * A warm truncation does NOT set this — it emits `history-skipped` instead.
+   * The two are different facts: a cold truncation is "we had no idea where we
+   * were, so we took the newest 100 and started from there", while a warm one is
+   * "we knew exactly where we were and chose to abandon a measurable window".
+   * Only the second one means a cursor is now describing a position the process
+   * never actually delivered, and a later measurement has to be able to count
+   * them apart without inspecting a flag on an event that means neither.
+   */
   truncated: boolean;
+}
+
+/**
+ * A warm gap fill deliberately abandoned part of its backlog.
+ *
+ * ── WHY THIS IS AN EVENT AND NOT A FLAG ───────────────────────────────────
+ *
+ * The cursor barrier exists to make it impossible for a cursor to advance past
+ * history that was never handled. This does exactly that on purpose. The two
+ * must be impossible to confuse, so the deliberate one announces itself with its
+ * own type, its own slot range, and its own digest finding — an ACKNOWLEDGED
+ * gap. The alternative is a cursor that silently describes a position the
+ * process never delivered, which is the failure the barrier was built for.
+ *
+ * `fromSlot`/`toSlot` bound the abandoned window and `count` is exact: paging
+ * runs to completion before truncation, so the whole skipped range is known.
+ * That costs one `getSignaturesForAddress` page per 1,000 skipped signatures —
+ * ~78 calls on the worst backlog observed, against the 20,045 `getTransaction`
+ * calls the bound removes — which is a good trade for being able to say exactly
+ * how much history was dropped and where.
+ */
+export interface HistorySkippedEvent {
+  wallet: Address;
+  /** Oldest abandoned slot. */
+  fromSlot: number;
+  /** Newest abandoned slot. The cursor now stands here. */
+  toSlot: number;
+  /** Exact count of abandoned signatures. */
+  count: number;
+  /** The bound that produced this, so the event says what it was measured against. */
+  bound: number;
 }
 
 export class WalletStream extends EventEmitter {
@@ -940,11 +1082,49 @@ export class WalletStream extends EventEmitter {
       truncated = true;
     }
 
+    // The warm bound. See `MAX_WARM_FILL` — this is an entry-latency decision,
+    // not a safety one, and it is the only place in the system that abandons
+    // history on purpose.
+    let skipped: SignatureEntry[] = [];
+    if (cursor !== undefined && entries.length > MAX_WARM_FILL) {
+      skipped = entries.slice(0, entries.length - MAX_WARM_FILL);
+      entries = entries.slice(-MAX_WARM_FILL);
+    }
+
     // Narrow the blanket hold to exactly what is about to be replayed. Until
     // this line the wallet's cursor cannot move at all, because nothing knew
     // what was outstanding; from here a 3,000-entry replay records progress as
     // it goes, and only positions with an unhandled predecessor are held back.
     this.deps.cursors.reserve(wallet, entries.map((entry) => entry.slot));
+
+    if (skipped.length > 0) {
+      const oldest = skipped[0]!;
+      const newest = skipped[skipped.length - 1]!;
+
+      // AFTER `reserve`, and that ordering is the whole safety argument.
+      //
+      // Every skipped slot is below every kept slot, so this write sits below
+      // the barrier and persists immediately — while a live delivery for the
+      // same wallet, which sits above it, stays deferred. The truncation point
+      // therefore cannot overwrite a newer live position, and a live position
+      // cannot be mistaken for the truncation point. That holds whether or not a
+      // socket is connected, which is what makes this order-independent ahead of
+      // prompt 16.
+      //
+      // The cursor is advanced deliberately: the window is abandoned, so the
+      // decision has to be durable or the next start re-attempts it and pays the
+      // cost again. Announced first-class rather than left as a silent jump —
+      // this is the one place a cursor legitimately names a position the process
+      // never delivered, and it says so.
+      this.deps.cursors.set(wallet, newest.signature, newest.slot, this.deps.now());
+      this.emit('history-skipped', {
+        wallet,
+        fromSlot: oldest.slot,
+        toSlot: newest.slot,
+        count: skipped.length,
+        bound: MAX_WARM_FILL,
+      } satisfies HistorySkippedEvent);
+    }
 
     for (const entry of entries) await this.handle(wallet, entry, 'gapfill');
 

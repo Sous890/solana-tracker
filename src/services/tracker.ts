@@ -185,6 +185,12 @@ export type TrackerEventName =
   /** A gap fill completed, with how many signatures it recovered. */
   | 'stream-gap-filled'
   /**
+   * A warm gap fill deliberately abandoned part of its backlog, with the slot
+   * range it dropped. An ACKNOWLEDGED gap — the one case where a cursor
+   * legitimately names a position this process never delivered.
+   */
+  | 'stream-history-skipped'
+  /**
    * One signature's trip through the RPC null window: attempts and elapsed ms.
    * The detection leg of CLAUDE.md gap 6, and a LOWER BOUND on copy delay.
    */
@@ -549,6 +555,9 @@ export class Tracker extends EventEmitter {
     });
     deps.stream.on('reconnected', (payload: unknown) => {
       this.record('stream-reconnected', { ...(payload as object), at: this.now() });
+    });
+    deps.stream.on('history-skipped', (payload: unknown) => {
+      this.record('stream-history-skipped', payload);
     });
     deps.stream.on('gap-filled', (payload: unknown) => {
       this.record('stream-gap-filled', payload);

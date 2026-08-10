@@ -17,6 +17,7 @@
  * than reported, because a number nobody reads is not a check.
  */
 
+import { MAX_WARM_FILL } from '../adapters/walletStream.js';
 import type { Fill, Lamports, UnixMillis } from '../core/types.js';
 import { lamportsToSol } from '../core/units.js';
 
@@ -116,6 +117,10 @@ const UNHANDLED_BASIS =
 /** Mirrors `MAX_DEFERRED` in `db/cursors.ts`, for the printed line only. */
 const MAX_DEFERRED_REPORTED = 4_096;
 
+const WARM_FILL_BASIS =
+  'entry-latency bound; 13 wallets x 100 x 194ms mean fetch = ~4.2 min startup (n=47,684 fetches), ' +
+  'p90 of observed fills is 100 (n=842 gap-filled events, 12 sessions to 2026-08-09)';
+
 const DEATH_DEDUPE_MS = 1_000;
 const DEATH_DEDUPE_BASIS =
   'pairs max 34ms (n=56) vs closest distinct deaths 9,946ms (n=35), 11 sessions to 2026-08-07';
@@ -207,6 +212,14 @@ export interface SoakSnapshot {
     /** ms between a disconnect and the reconnect that followed it. */
     reconnectLatencyMs: { count: number; p50: number; max: number };
     gapFills: number;
+    /**
+     * Windows a warm gap fill deliberately abandoned, with their slot ranges.
+     * Distinct from `truncatedGapFills`, which counts COLD truncations — those
+     * happen when the cursor was unusable, these when it was usable and the
+     * backlog was dropped on purpose.
+     */
+    historySkipped: Array<{ wallet: string; fromSlot: number; toSlot: number; count: number }>;
+    signaturesSkipped: number;
     signaturesRecovered: number;
     truncatedGapFills: number;
     /**
@@ -296,6 +309,20 @@ export class SoakDigest {
   private lastDisconnectAt: UnixMillis | undefined;
   private readonly reconnectLatencies: number[] = [];
   private gapFills = 0;
+  /**
+   * Windows a warm gap fill deliberately abandoned.
+   *
+   * Accumulated HERE rather than read back through a callback at snapshot time,
+   * which is what makes it survive a final digest taken during shutdown. The
+   * `?? 0` over a torn-down `tracker.session` reported `written: 0` for a
+   * recorder that had written 71,891 lines; internal state cannot fail that way.
+   */
+  private readonly historySkipped: Array<{
+    wallet: string;
+    fromSlot: number;
+    toSlot: number;
+    count: number;
+  }> = [];
   private signaturesRecovered = 0;
   private truncatedGapFills = 0;
   private rateLimited = 0;
@@ -405,6 +432,21 @@ export class SoakDigest {
         }
         break;
       }
+      case 'stream-history-skipped': {
+        const event = data as {
+          wallet?: string;
+          fromSlot?: number;
+          toSlot?: number;
+          count?: number;
+        };
+        this.historySkipped.push({
+          wallet: event.wallet ?? 'unknown',
+          fromSlot: event.fromSlot ?? 0,
+          toSlot: event.toSlot ?? 0,
+          count: event.count ?? 0,
+        });
+        break;
+      }
       case 'stream-gap-filled': {
         const event = data as { count?: number; truncated?: boolean };
         this.gapFills += 1;
@@ -482,6 +524,18 @@ export class SoakDigest {
         `${[...this.unmodeled.keys()].sort().join(', ')} produced unmodeled events — the session schema is incomplete`,
       );
     }
+    // An acknowledged gap is not an error — it is the warm bound working. It is
+    // a FINDING because a run that skipped history and did not say so is a run
+    // whose cursors describe positions it never delivered, and that has to be
+    // visible in the one artifact anybody reads rather than only in the session
+    // file.
+    for (const gap of this.historySkipped) {
+      findings.push(
+        `ACKNOWLEDGED GAP: ${gap.wallet} skipped ${gap.count} signature(s), ` +
+          `slots ${gap.fromSlot}-${gap.toSlot} — warm fill bounded at ` +
+          `${MAX_WARM_FILL}, basis: ${WARM_FILL_BASIS}`,
+      );
+    }
     for (const [mint, count] of [...this.noRoute].sort()) {
       findings.push(`NO_ROUTE while holding ${mint} (${count}x) — needs an explanation`);
     }
@@ -541,6 +595,8 @@ export class SoakDigest {
           max: latencies.at(-1) ?? 0,
         },
         gapFills: this.gapFills,
+        historySkipped: this.historySkipped.map((gap) => ({ ...gap })),
+        signaturesSkipped: this.historySkipped.reduce((sum, gap) => sum + gap.count, 0),
         signaturesRecovered: this.signaturesRecovered,
         truncatedGapFills: this.truncatedGapFills,
         barrier: this.options.barrierStats?.() ?? {
@@ -619,6 +675,7 @@ export function formatDigest(snapshot: SoakSnapshot): string {
         `${snapshot.stream.deathEchoesCollapsed} echoes collapsed at ${DEATH_DEDUPE_MS}ms; ${DEATH_DEDUPE_BASIS}), ` +
         `reconnect p50 ${snapshot.stream.reconnectLatencyMs.p50}ms max ${snapshot.stream.reconnectLatencyMs.max}ms, ` +
         `${snapshot.stream.gapFills} gap fills recovering ${snapshot.stream.signaturesRecovered} sigs, ` +
+        `${snapshot.stream.signaturesSkipped} skipped in ${snapshot.stream.historySkipped.length} acknowledged gap(s), ` +
         `barrier peak deferred ${snapshot.stream.barrier.peakDeferred}/${MAX_DEFERRED_REPORTED} ` +
         `outstanding ${snapshot.stream.barrier.peakOutstanding} held-now ${snapshot.stream.barrier.heldNow}`,
     ],

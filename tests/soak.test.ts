@@ -504,6 +504,42 @@ describe('soak digest', () => {
     expect(snapshot.stream.deathEchoesCollapsed).toBe(2);
   });
 
+  it('surfaces an acknowledged gap as a finding, and survives a shutdown snapshot', () => {
+    // The digest is the one artifact anybody reads. A run that skipped history
+    // and did not say so is a run whose cursors describe positions it never
+    // delivered.
+    const digest = digestOf();
+    digest.observe('stream-history-skipped', {
+      wallet: 'BCagckXeMChUKrHEd6fKFA1uiWDtcmCXMsqaheLiUPJd',
+      fromSlot: 437_800_000,
+      toSlot: 437_911_358,
+      count: 19_945,
+    });
+
+    const snapshot = digest.snapshot(T0 + 1_000);
+    expect(snapshot.stream.historySkipped).toHaveLength(1);
+    expect(snapshot.stream.signaturesSkipped).toBe(19_945);
+
+    const finding = snapshot.findings.find((f) => f.includes('ACKNOWLEDGED GAP'));
+    expect(finding).toBeDefined();
+    expect(finding).toContain('19945');
+    expect(finding).toContain('437800000-437911358');
+    // Threshold and basis on the line, like every other finding.
+    expect(finding).toContain('bounded at 100');
+    expect(finding).toContain('n=47,684');
+
+    // Accumulated in the digest's own state rather than read back through a
+    // callback at snapshot time. That is what makes it survive a final digest
+    // taken during shutdown: the `?? 0` over a torn-down `tracker.session`
+    // reported `written: 0` for a recorder that had written 71,891 lines, and
+    // internal state cannot fail that way. Snapshotting repeatedly, as the
+    // hourly-then-final sequence does, must not lose or double it.
+    const second = digest.snapshot(T0 + 2_000);
+    expect(second.stream.historySkipped).toHaveLength(1);
+    expect(second.stream.signaturesSkipped).toBe(19_945);
+    expect(second.findings.filter((f) => f.includes('ACKNOWLEDGED GAP'))).toHaveLength(1);
+  });
+
   it('keeps two deaths separate once they are further apart than the window', () => {
     const digest = digestOf();
     digest.observe('stream-disconnected', { at: T0, phase: 'socket-death' });
