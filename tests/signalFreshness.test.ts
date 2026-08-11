@@ -34,6 +34,7 @@ import type {
 } from '../src/services/tracker.js';
 import { StrategyRunner, signalOf } from '../src/services/strategyRunner.js';
 import { createMirrorStrategy } from '../src/strategies/mirror.js';
+import { copyableScores } from './fixtures/scores.js';
 
 const NOW = 1_700_000_000_000;
 const DECIMALS = 6;
@@ -216,6 +217,7 @@ function harness(configOverrides: Partial<Config> = {}) {
   const events: TrackerEventRecord[] = [];
 
   const tracker = new Tracker({
+    walletScores: copyableScores,
     config,
     ledger,
     runtime,

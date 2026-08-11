@@ -16,6 +16,7 @@ import { openFillsView } from '../src/db/fillsView.js';
 import { Tracker } from '../src/services/tracker.js';
 import type { HeldPositionScreener, Scheduler, WalletFeed } from '../src/services/tracker.js';
 import { API_HOST, createApi, startApi, toJsonSafe } from '../src/services/api.js';
+import { copyableScores } from './fixtures/scores.js';
 
 const MINT_A = 'DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263';
 const NOW = 1_700_000_000_000;
@@ -112,6 +113,7 @@ function harness(
   });
 
   const tracker = new Tracker({
+    walletScores: copyableScores,
     config,
     ledger,
     runtime,

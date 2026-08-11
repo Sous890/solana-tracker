@@ -24,6 +24,7 @@ import { openRuntimeState } from '../../src/db/runtimeState.js';
 import { Tracker } from '../../src/services/tracker.js';
 import type { Scheduler, WalletFeed } from '../../src/services/tracker.js';
 import { EventEmitter } from 'node:events';
+import { copyableScores } from './scores.js';
 
 const [, , dbPath, mint] = process.argv;
 
@@ -86,6 +87,7 @@ const broker = createPaperBroker({
 });
 
 const tracker = new Tracker({
+    walletScores: copyableScores,
   config,
   ledger,
   runtime,

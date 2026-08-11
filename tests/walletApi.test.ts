@@ -24,6 +24,7 @@ import type { HeldPositionScreener, Scheduler, WalletFeed } from '../src/service
 import { createApi } from '../src/services/api.js';
 import { openWalletStore } from '../src/services/walletStore.js';
 import type { WalletStore } from '../src/services/walletStore.js';
+import { copyableScores } from './fixtures/scores.js';
 
 const A = 'DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263';
 const B = 'So11111111111111111111111111111111111111112';
@@ -104,6 +105,7 @@ function harness(seed: Record<string, unknown> = {}, uiPath?: string): Harness {
   const stream = new FakeStream(store.liveAddresses);
 
   const tracker = new Tracker({
+    walletScores: copyableScores,
     config,
     ledger,
     runtime,
@@ -353,6 +355,7 @@ describe('without a store', () => {
     const runtime = openRuntimeState({ path: dbPath });
     const fills = openFillsView({ path: dbPath });
     const tracker = new Tracker({
+    walletScores: copyableScores,
       config,
       ledger,
       runtime,

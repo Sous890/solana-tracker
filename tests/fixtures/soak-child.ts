@@ -26,6 +26,7 @@ import type { HeldPositionScreener, Scheduler, WalletFeed } from '../../src/serv
 import { StrategyRunner } from '../../src/services/strategyRunner.js';
 import { createMirrorStrategy } from '../../src/strategies/mirror.js';
 import { canSellFromScreener } from '../../src/adapters/safety.js';
+import { copyableScores } from './scores.js';
 
 const [dbPath, sessionDir, mode] = process.argv.slice(2);
 if (dbPath === undefined || sessionDir === undefined || mode === undefined) {
@@ -167,6 +168,7 @@ const broker = createPaperBroker({
 
 const stream = new FakeStream();
 const tracker = new Tracker({
+    walletScores: copyableScores,
   config,
   ledger,
   runtime,

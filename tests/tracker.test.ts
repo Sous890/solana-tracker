@@ -41,6 +41,8 @@ import type {
   WalletFeed,
 } from '../src/services/tracker.js';
 import { GuardRejection } from '../src/core/guards.js';
+import { copyableScores } from './fixtures/scores.js';
+import type { WalletScoresFile } from '../src/services/walletScores.js';
 
 const MINT_A = 'DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263';
 const MINT_B = 'JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN';
@@ -163,6 +165,7 @@ interface HarnessOptions {
   ledger?: Ledger;
   runtime?: RuntimeState;
   broker?: Broker;
+  walletScores?: WalletScoresFile;
 }
 
 interface Harness {
@@ -240,6 +243,9 @@ function harness(options: HarnessOptions = {}): Harness {
   const events: TrackerEventRecord[] = [];
 
   const tracker = new Tracker({
+    // Defaults to every test wallet copyable. A test that wants the gate to
+    // bite passes its own scores — absence is a refusal, not a pass.
+    walletScores: options.walletScores ?? copyableScores,
     config,
     ledger,
     runtime,
@@ -1882,5 +1888,160 @@ describe('the discarded exit', () => {
     expect(h.tracker.stats.exitLatchFired).toBe(0);
     expect(h.tracker.stats.exitLatchDiscarded).toBe(0);
     expect(h.events.filter((e) => e.type === 'exit-latched')).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Per-wallet admission
+// ---------------------------------------------------------------------------
+
+describe('a wallet we cannot copy is refused at the signal', () => {
+  const settle = async (n = 10): Promise<void> => {
+    for (let i = 0; i < n; i += 1) await new Promise((r) => setImmediate(r));
+  };
+  const FAST = 'popo3Rj6arKNttyUFpWfbkv2gG8uS13TGtmH6JPMuHz';
+  const SLOW = 'CT9dekyfadMYxLdfxV76ASSLo2QKXaj5cGPmvM2rcKVC';
+  const THIN = 'yVrqX84dNn9pWP3Y2gBzqkCqHLfw7zsukSqjZTDoQ2C';
+
+  const scores: WalletScoresFile = {
+    generatedAt: '2026-08-11T00:00:00.000Z',
+    basis: 'session 26, n=147 paired round trips against a 5,479ms chain-to-fill',
+    scores: [
+      // 14/14 round trips close inside our chain-to-fill.
+      { wallet: FAST, uncopyableShare: 1, roundTrips: 14, againstDelayMs: 5_479,
+        measuredFrom: 'a', measuredTo: 'b' },
+      { wallet: SLOW, uncopyableShare: 0, roundTrips: 40, againstDelayMs: 5_479,
+        measuredFrom: 'a', measuredTo: 'b' },
+      // Perfect share, meaningless sample.
+      { wallet: THIN, uncopyableShare: 0, roundTrips: 1, againstDelayMs: 5_479,
+        measuredFrom: 'a', measuredTo: 'b' },
+    ],
+  };
+
+  /** The gate sits behind the same driver check as strategy dispatch. */
+  function attachIdleDriver(h: Harness): void {
+    const driver = new EventEmitter() as unknown as Parameters<typeof h.tracker.useStrategy>[0];
+    (driver as unknown as { onTrackedSwap: () => Promise<void> }).onTrackedSwap = async () =>
+      undefined;
+    h.tracker.useStrategy(driver);
+  }
+
+  function swapFrom(wallet: string, side: 'buy' | 'sell' = 'buy'): TrackedSwap {
+    return {
+      wallet, mint: MINT_A, side, solAmount: 1_000_000_000n, tokenAmount: 1_000_000_000n,
+      decimals: DECIMALS, signature: `sig-${wallet.slice(0, 4)}-${side}`, slot: 1,
+      blockTime: null, venue: 'pumpfun', feePayer: true, source: 'live', observedAt: NOW,
+    };
+  }
+
+  it('refuses a 100%-uncopyable wallet, typed and logged with its n', async () => {
+    const h = harness({ walletScores: scores, canSell: async () => ({ ok: true }) });
+    openHarnesses.push(h);
+    const driver = new EventEmitter() as unknown as Parameters<typeof h.tracker.useStrategy>[0];
+    let consulted = 0;
+    (driver as unknown as { onTrackedSwap: () => Promise<void> }).onTrackedSwap = async () => {
+      consulted += 1;
+    };
+    h.tracker.useStrategy(driver);
+    await h.tracker.start();
+
+    h.stream.emit('swap', swapFrom(FAST));
+    await settle();
+
+    // Refused before the strategy is even asked.
+    expect(consulted).toBe(0);
+    const refusals = h.events.filter((e) => e.type === 'signal-refused');
+    expect(refusals).toHaveLength(1);
+    const payload = refusals[0]?.data as { code: string; uncopyableShare: number; roundTrips: number };
+    expect(payload.code).toBe('WALLET_NOT_COPYABLE');
+    expect(payload.uncopyableShare).toBe(1);
+    expect(payload.roundTrips).toBe(14);
+  });
+
+  it('refuses an unscored wallet as WALLET_UNSCORED, reporting the sample size', async () => {
+    // "We know this is bad" and "we do not know" are different facts, and only
+    // the second is fixed by waiting for more data.
+    const h = harness({ walletScores: scores, canSell: async () => ({ ok: true }) });
+    openHarnesses.push(h);
+    attachIdleDriver(h);
+    await h.tracker.start();
+
+    h.stream.emit('swap', swapFrom(THIN));
+    h.stream.emit('swap', swapFrom('BQ72nSv9f3PRyRKCBnHLVrerrv37CYTHm5h3s9XSiHMY'));
+    await settle();
+
+    const codes = h.events
+      .filter((e) => e.type === 'signal-refused')
+      .map((e) => (e.data as { code: string; roundTrips: number }));
+    expect(codes).toHaveLength(2);
+    expect(codes.every((c) => c.code === 'WALLET_UNSCORED')).toBe(true);
+    // Thin sample reports what it had; entirely absent reports zero.
+    expect(codes.map((c) => c.roundTrips).sort()).toEqual([0, 1]);
+  });
+
+  it('lets a wallet under the threshold through unchanged', async () => {
+    const h = harness({ walletScores: scores, canSell: async () => ({ ok: true }) });
+    openHarnesses.push(h);
+    const driver = new EventEmitter() as unknown as Parameters<typeof h.tracker.useStrategy>[0];
+    let consulted = 0;
+    (driver as unknown as { onTrackedSwap: () => Promise<void> }).onTrackedSwap = async () => {
+      consulted += 1;
+    };
+    h.tracker.useStrategy(driver);
+    await h.tracker.start();
+
+    h.stream.emit('swap', swapFrom(SLOW));
+    await settle();
+
+    expect(consulted).toBe(1);
+    expect(h.events.filter((e) => e.type === 'signal-refused')).toHaveLength(0);
+  });
+
+  it('refuses even when the wallet IS in config.trackedWallets', async () => {
+    // Config is editable and the gate must hold if someone puts it back.
+    // Removing a wallet from config is not the deliverable.
+    const h = harness({
+      walletScores: scores,
+      canSell: async () => ({ ok: true }),
+      config: { trackedWallets: [FAST, SLOW] },
+    });
+    openHarnesses.push(h);
+    attachIdleDriver(h);
+    await h.tracker.start();
+
+    expect(h.config.trackedWallets).toContain(FAST);
+    h.stream.emit('swap', swapFrom(FAST));
+    await settle();
+
+    expect(h.events.filter((e) => e.type === 'signal-refused')).toHaveLength(1);
+  });
+
+  it('leaves exits on a refused wallet completely alone', async () => {
+    // A position held on a refused wallet's mint must still be exitable. The
+    // gate is about acquiring exposure; applying it to an exit would strand the
+    // book on a wallet we stopped following.
+    const h = harness({ walletScores: scores, canSell: async () => ({ ok: true }) });
+    openHarnesses.push(h);
+    h.ledger.recordFill(buyFill());
+    const driver = new EventEmitter() as unknown as Parameters<typeof h.tracker.useStrategy>[0];
+    const seen: string[] = [];
+    (driver as unknown as { onTrackedSwap: (s: TrackedSwap) => Promise<void> }).onTrackedSwap =
+      async (swap) => {
+        seen.push(swap.side);
+      };
+    h.tracker.useStrategy(driver);
+    await h.tracker.start();
+
+    h.stream.emit('swap', swapFrom(FAST, 'sell'));
+    await settle();
+
+    // The sell reached the strategy despite the wallet being refused for entry.
+    expect(seen).toEqual(['sell']);
+    expect(h.events.filter((e) => e.type === 'signal-refused')).toHaveLength(0);
+
+    // And the price loop, which never reads this path, still sells it.
+    h.scheduler.fire(0);
+    await settle();
+    expect(h.tracker.stats.priceTicks).toBeGreaterThan(0);
   });
 });

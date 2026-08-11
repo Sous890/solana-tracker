@@ -75,7 +75,10 @@ import type {
 import { WRAPPED_SOL_MINT, baseUnitsToTokens, lamportsToSol } from '../core/units.js';
 import { openLedger } from '../db/ledger.js';
 import type { Ledger, ReconcileReport } from '../db/ledger.js';
+import { readFileSync } from 'node:fs';
 import { openCursorStore } from '../db/cursors.js';
+import { loadWalletScores } from './walletScores.js';
+import type { WalletScoreIndex, WalletScoresFile } from './walletScores.js';
 import type { CursorStore } from '../db/cursors.js';
 import { openRuntimeState } from '../db/runtimeState.js';
 import type { RuntimeState } from '../db/runtimeState.js';
@@ -206,6 +209,11 @@ export type TrackerEventName =
   | 'exit-latched'
   /** A latched exit became a sell intent, was discarded, or aged out. */
   | 'exit-latch-resolved'
+  /**
+   * An ENTRY signal was refused on the wallet that produced it, before any
+   * intent existed. Carries the measured share and its `n`.
+   */
+  | 'signal-refused'
   /**
    * One signature's trip through the RPC null window: attempts and elapsed ms.
    * The detection leg of CLAUDE.md gap 6, and a LOWER BOUND on copy delay.
@@ -385,6 +393,12 @@ export interface TrackerDeps {
   logger: TrackerLogger;
   now?: () => UnixMillis;
   scheduler?: Scheduler;
+  /**
+   * Per-wallet copyability, written by the slow loop. Absent means every wallet
+   * is unscored and every entry signal is refused — which is the correct
+   * default, not a degraded one.
+   */
+  walletScores?: WalletScoresFile;
   priceIntervalMs?: number;
   screenIntervalMs?: number;
   heartbeatIntervalMs?: number;
@@ -514,6 +528,15 @@ export class Tracker extends EventEmitter {
    * intent was ever created, not that one was refused.
    */
   private readonly exitLatch = new Map<Address, { swap: TrackedSwap; latchedAt: UnixMillis }>();
+  /** Read per entry signal. A map lookup — the fast loop does no scoring. */
+  private readonly walletScores: WalletScoreIndex;
+  /** Admitted wallets whose source exited before our entry filled. See `onSwap`. */
+  private readonly lateOnAdmitted = new Map<Address, number>();
+
+  /** How often we arrived late on a wallet the gate admitted, by wallet. */
+  lateArrivals(): Record<string, number> {
+    return Object.fromEntries([...this.lateOnAdmitted].sort());
+  }
   private priceTickRunning = false;
   private screenTickRunning = false;
 
@@ -549,6 +572,7 @@ export class Tracker extends EventEmitter {
   constructor(deps: TrackerDeps) {
     super();
     this.deps = deps;
+    this.walletScores = loadWalletScores(deps.walletScores);
     this.now = deps.now ?? (() => Date.now());
     this.scheduler = deps.scheduler ?? realScheduler;
     this.priceIntervalMs = deps.priceIntervalMs ?? PRICE_INTERVAL_MS;
@@ -1512,8 +1536,49 @@ export class Tracker extends EventEmitter {
       this.deps.ledger.getPosition(swap.mint)?.state !== 'open'
     ) {
       this.exitLatch.set(swap.mint, { swap, latchedAt: this.now() });
+      // We were too slow for this one, on a wallet the gate ADMITTED. An
+      // admitted wallet is not a wallet we are always fast enough for —
+      // C86oRMyU is admitted at a 19% uncopyable share and has a minimum hold
+      // of zero slots — so the digest counts how often it happens rather than
+      // letting the admission imply it does not.
+      this.lateOnAdmitted.set(swap.wallet, (this.lateOnAdmitted.get(swap.wallet) ?? 0) + 1);
       this.record('exit-latched', { mint: swap.mint, wallet: swap.wallet, at: this.now() });
       return;
+    }
+
+    // ── THE ADMISSION GATE, ON ENTRY SIGNALS ONLY ────────────────────────
+    //
+    // A wallet that closes its round trips faster than this process can enter
+    // them is not a source of signal, it is a source of losses: we pay the
+    // round trip to get in and the position is already gone. That is a fact
+    // about OUR latency, so it is refused here — where the decision to act is
+    // made — rather than only by editing `config.trackedWallets`, which is a
+    // file anybody can put a wallet back into.
+    //
+    // Buys only. An exit signal for a mint we hold must always get through:
+    // refusing it would strand a position on a wallet we stopped following,
+    // which is the one outcome the whole exit asymmetry exists to prevent. The
+    // price loop is untouched by construction — it never reads this path.
+    if (swap.side === 'buy') {
+      const refusal = this.walletScores.admit(swap.wallet);
+      if (refusal !== null) {
+        this.record('signal-refused', {
+          wallet: swap.wallet,
+          mint: swap.mint,
+          signature: swap.signature,
+          code: refusal.code,
+          reason: refusal.reason,
+          ...(refusal.code === 'WALLET_NOT_COPYABLE'
+            ? { uncopyableShare: refusal.uncopyableShare }
+            : {}),
+          roundTrips: refusal.roundTrips,
+        });
+        this.deps.logger.warn(
+          { wallet: swap.wallet, mint: swap.mint, code: refusal.code },
+          `Refused signal from ${swap.wallet}: ${refusal.reason}`,
+        );
+        return;
+      }
     }
 
     // Tracked in `inFlight` so `stop()` waits for it. The runner's 500ms
@@ -1625,6 +1690,8 @@ export interface TrackerRuntimeOptions {
   rpcHttpUrl: string;
   /** `RPC_WSS_URL`. */
   rpcWssUrl: string;
+  /** Copyability scores. Defaults to `./data/wallet-scores.json`. */
+  walletScoresPath?: string;
   /** `JUPITER_API_KEY`. Absent selects the rate-limited free host. */
   jupiterApiKey?: string;
   /**
@@ -1798,7 +1865,28 @@ export function createTrackerRuntime(options: TrackerRuntimeOptions): TrackerRun
     connect: createStreamSocketFactory({ wssUrl: options.rpcWssUrl }),
   });
 
+  // Read once at composition. The fast loop must never touch the filesystem on
+  // the signal path, and a missing file is not an error — it means no wallet is
+  // scored yet, so every entry signal is refused as `WALLET_UNSCORED`. That is
+  // the correct default: a bot with no copyability evidence should not trade.
+  let walletScores: WalletScoresFile | undefined;
+  const scoresPath = options.walletScoresPath ?? './data/wallet-scores.json';
+  try {
+    walletScores = JSON.parse(readFileSync(scoresPath, 'utf8')) as WalletScoresFile;
+    logger.info(
+      { path: scoresPath, wallets: walletScores.scores.length },
+      `Loaded copyability scores for ${walletScores.scores.length} wallet(s)`,
+    );
+  } catch {
+    logger.warn(
+      { path: scoresPath },
+      'No wallet copyability scores — every entry signal will be refused as WALLET_UNSCORED. ' +
+        'Run `npx tsx scripts/score-wallets.ts`.',
+    );
+  }
+
   const tracker = new Tracker({
+    ...(walletScores === undefined ? {} : { walletScores }),
     config,
     ledger,
     runtime,

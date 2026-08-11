@@ -47,6 +47,7 @@ import {
   shortAddress,
 } from '../src/strategies/mirror.js';
 import { createEquationStrategy } from '../src/strategies/equation.js';
+import { copyableScores } from './fixtures/scores.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const SRC = resolve(HERE, '../src');
@@ -545,6 +546,7 @@ function harness(options: HarnessOptions = {}): Harness {
   });
 
   const tracker = new Tracker({
+    walletScores: copyableScores,
     config,
     ledger,
     runtime,
