@@ -197,6 +197,12 @@ export type TrackerEventName =
    */
   | 'stream-history-skipped'
   /**
+   * A transaction the notification already reported as failed, classified
+   * without a fetch. Counted rather than dropped — the point is to stop paying
+   * ~194ms to confirm what `err` already said, not to stop knowing about it.
+   */
+  | 'stream-tx-failed-skipped'
+  /**
    * One signature's trip through the RPC null window: attempts and elapsed ms.
    * The detection leg of CLAUDE.md gap 6, and a LOWER BOUND on copy delay.
    */
@@ -573,6 +579,9 @@ export class Tracker extends EventEmitter {
     deps.stream.on('connected', (payload: unknown) => {
       this.record('stream-connected', { ...(payload as object), at: this.now() });
       this.onConnected();
+    });
+    deps.stream.on('tx-failed-skipped', (payload: unknown) => {
+      this.record('stream-tx-failed-skipped', payload);
     });
     deps.stream.on('history-skipped', (payload: unknown) => {
       this.record('stream-history-skipped', payload);

@@ -540,6 +540,39 @@ describe('soak digest', () => {
     expect(second.findings.filter((f) => f.includes('ACKNOWLEDGED GAP'))).toHaveLength(1);
   });
 
+  it('counts avoided failed-tx fetches, and survives a shutdown snapshot', () => {
+    const digest = digestOf();
+    for (let i = 0; i < 3; i += 1) {
+      digest.observe('stream-tx-failed-skipped', {
+        wallet: 'BCagckXeMChUKrHEd6fKFA1uiWDtcmCXMsqaheLiUPJd',
+        signature: `bad-${i}`,
+        slot: 500 + i,
+        source: 'live',
+      });
+    }
+    digest.observe('stream-tx-failed-skipped', {
+      wallet: 'popo3Rj6arKNttyUFpWfbkv2gG8uS13TGtmH6JPMuHz',
+      signature: 'bad-x',
+      slot: 900,
+      source: 'gapfill',
+    });
+
+    const snapshot = digest.snapshot(T0 + 1_000);
+    expect(snapshot.stream.txFailedSkipped).toBe(4);
+    expect(snapshot.stream.txFailedSkippedByWallet).toEqual({
+      BCagckXeMChUKrHEd6fKFA1uiWDtcmCXMsqaheLiUPJd: 3,
+      popo3Rj6arKNttyUFpWfbkv2gG8uS13TGtmH6JPMuHz: 1,
+    });
+    // Saved work, not a defect — it must not become a finding.
+    expect(snapshot.findings).toEqual([]);
+
+    // Held in the digest's own state, so a final snapshot taken while the
+    // tracker tears down cannot read zero off a torn-down source. That is the
+    // failure that reported `written: 0` for a recorder with 71,891 lines.
+    const second = digest.snapshot(T0 + 2_000);
+    expect(second.stream.txFailedSkipped).toBe(4);
+  });
+
   it('keeps two deaths separate once they are further apart than the window', () => {
     const digest = digestOf();
     digest.observe('stream-disconnected', { at: T0, phase: 'socket-death' });

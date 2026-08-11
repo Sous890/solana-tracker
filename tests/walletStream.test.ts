@@ -17,6 +17,7 @@ import {
 import type {
   GapFilledEvent,
   HistorySkippedEvent,
+  TxFailedSkippedEvent,
   RpcClient,
   SignatureEntry,
   StreamSocket,
@@ -150,6 +151,15 @@ function fakeSocket(firstSubscriptionId = 1_000) {
       onMessage(
         JSON.stringify({
           params: { subscription, result: { context: { slot }, value: { signature, err: null } } },
+        }),
+      );
+    },
+    /** A log notification whose transaction failed on chain. */
+    deliverFailed: (signature: string, slot: number, err: unknown) => {
+      const subscription = [...subscriptionIds.values()][0];
+      onMessage(
+        JSON.stringify({
+          params: { subscription, result: { context: { slot }, value: { signature, err } } },
         }),
       );
     },
@@ -1916,6 +1926,119 @@ describe('bounded warm gap fill', () => {
     } finally {
       warm.stream.stop();
       warm.cursors.close();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Failed transactions are classified, not fetched
+// ---------------------------------------------------------------------------
+
+describe('a transaction the notification already called failed', () => {
+  function rig(history: SignatureEntry[]) {
+    const { rpc, fetched } = fakeRpc({ history });
+    const cursors = openCursorStore({ path: ':memory:' });
+    const socket = fakeSocket();
+    const stream = new WalletStream({
+      wallets: [WALLET],
+      rpc,
+      cursors,
+      connect: async () => socket.socket,
+      now: () => 1_700_000_000_000,
+      sleep: async () => undefined,
+      random: () => 0,
+    });
+    const skipped: TxFailedSkippedEvent[] = [];
+    const swaps: TrackedSwap[] = [];
+    stream.on('tx-failed-skipped', (e: TxFailedSkippedEvent) => skipped.push(e));
+    stream.on('swap', (s: TrackedSwap) => swaps.push(s));
+    stream.on('error', () => undefined);
+    return { stream, cursors, socket, skipped, swaps, fetched };
+  }
+
+  const tick = async (n = 8): Promise<void> => {
+    for (let i = 0; i < n; i += 1) await new Promise((r) => setImmediate(r));
+  };
+
+  it('is not fetched, not queued, and is classified once', async () => {
+    const h = rig([]);
+    try {
+      await h.stream.start();
+      h.socket.deliverFailed('sig-bad', 500, { InstructionError: [0, 'X'] });
+      await tick();
+
+      expect(h.fetched).toHaveLength(0);
+      expect(h.skipped).toHaveLength(1);
+      expect(h.skipped[0]).toMatchObject({ wallet: WALLET, signature: 'sig-bad', slot: 500 });
+      expect(h.skipped[0]?.err).not.toBeNull();
+      expect(h.swaps).toHaveLength(0);
+    } finally {
+      h.stream.stop();
+      h.cursors.close();
+    }
+  });
+
+  it('leaves a successful notification completely unchanged', async () => {
+    const history = entries(1);
+    const h = rig(history);
+    try {
+      await h.stream.start();
+      h.socket.deliver('sig-1', 101);
+      await tick();
+
+      expect(h.skipped).toHaveLength(0);
+      expect(h.fetched).toContain('sig-1');
+    } finally {
+      h.stream.stop();
+      h.cursors.close();
+    }
+  });
+
+  it('skips a failed gap-fill entry identically, and still advances the cursor', async () => {
+    // Filtering live only would defer the cost, not remove it: a signature
+    // skipped at the socket is not in `seen` after a restart, so gap fill would
+    // re-offer it and pay the 194ms then instead.
+    const history: SignatureEntry[] = [
+      { signature: 'sig-3', slot: 103, err: null, transactionIndex: 0 },
+      { signature: 'sig-2', slot: 102, err: { Err: 1 }, transactionIndex: 0 },
+      { signature: 'sig-1', slot: 101, err: null, transactionIndex: 0 },
+    ];
+    const h = rig(history);
+    try {
+      await h.stream.start();
+
+      expect(h.fetched).not.toContain('sig-2');
+      expect(h.skipped.map((e) => e.signature)).toEqual(['sig-2']);
+      expect(h.skipped[0]?.source).toBe('gapfill');
+      // Reserved like any other position, so the cursor walks over it in order
+      // rather than leaving a hole a later write steps past silently.
+      expect(h.cursors.get(WALLET)?.lastSignature).toBe('sig-3');
+    } finally {
+      h.stream.stop();
+      h.cursors.close();
+    }
+  });
+
+  it('does not shed a queued successful notification behind a burst of failures', async () => {
+    // The eviction case, asserted directly. The queue is global and sheds
+    // OLDEST first, so before this change a flood of failures pushed real swaps
+    // out of it — measured at up to 42.6% of one wallet's traffic.
+    const history = entries(1);
+    const h = rig(history);
+    try {
+      await h.stream.start();
+      h.socket.deliver('sig-1', 101);
+      for (let i = 0; i < MAX_IN_FLIGHT * 5; i += 1) {
+        h.socket.deliverFailed(`bad-${i}`, 600 + i, { Err: i });
+      }
+      await tick(20);
+
+      expect(h.skipped).toHaveLength(MAX_IN_FLIGHT * 5);
+      // The one that mattered survived and was fetched.
+      expect(h.fetched).toContain('sig-1');
+    } finally {
+      h.stream.stop();
+      h.cursors.close();
     }
   });
 });

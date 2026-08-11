@@ -218,6 +218,12 @@ export interface SoakSnapshot {
      * happen when the cursor was unusable, these when it was usable and the
      * backlog was dropped on purpose.
      */
+    /**
+     * Failed transactions classified at ingress instead of fetched. Not a
+     * finding: this is saved work, and the number is what says how much.
+     */
+    txFailedSkipped: number;
+    txFailedSkippedByWallet: Tally;
     historySkipped: Array<{
       wallet: string;
       fromSlot: number;
@@ -325,6 +331,14 @@ export class SoakDigest {
    * `?? 0` over a torn-down `tracker.session` reported `written: 0` for a
    * recorder that had written 71,891 lines; internal state cannot fail that way.
    */
+  /**
+   * Failed transactions classified from `err` without a fetch.
+   *
+   * Accumulated in the digest's own state, so it survives a final snapshot taken
+   * during shutdown rather than reading zero off a torn-down source.
+   */
+  private txFailedSkipped = 0;
+  private readonly txFailedSkippedByWallet = new Map<string, number>();
   private readonly historySkipped: Array<{
     wallet: string;
     fromSlot: number;
@@ -438,6 +452,12 @@ export class SoakDigest {
           this.reconnectLatencies.push(Math.max(0, at - this.lastDisconnectAt));
           this.lastDisconnectAt = undefined;
         }
+        break;
+      }
+      case 'stream-tx-failed-skipped': {
+        const event = data as { wallet?: string; source?: string };
+        this.txFailedSkipped += 1;
+        bump(this.txFailedSkippedByWallet, event.wallet ?? 'unknown');
         break;
       }
       case 'stream-history-skipped': {
@@ -606,6 +626,8 @@ export class SoakDigest {
           max: latencies.at(-1) ?? 0,
         },
         gapFills: this.gapFills,
+        txFailedSkipped: this.txFailedSkipped,
+        txFailedSkippedByWallet: sorted(this.txFailedSkippedByWallet),
         historySkipped: this.historySkipped.map((gap) => ({ ...gap })),
         signaturesSkipped: this.historySkipped.reduce((sum, gap) => sum + (gap.count ?? 0), 0),
         historySkippedUncounted: this.historySkipped.filter((gap) => gap.count === null).length,
@@ -687,6 +709,7 @@ export function formatDigest(snapshot: SoakSnapshot): string {
         `${snapshot.stream.deathEchoesCollapsed} echoes collapsed at ${DEATH_DEDUPE_MS}ms; ${DEATH_DEDUPE_BASIS}), ` +
         `reconnect p50 ${snapshot.stream.reconnectLatencyMs.p50}ms max ${snapshot.stream.reconnectLatencyMs.max}ms, ` +
         `${snapshot.stream.gapFills} gap fills recovering ${snapshot.stream.signaturesRecovered} sigs, ` +
+        `${snapshot.stream.txFailedSkipped} failed-tx fetches avoided, ` +
         `${snapshot.stream.signaturesSkipped}+ skipped in ${snapshot.stream.historySkipped.length} acknowledged gap(s) ` +
         `(${snapshot.stream.historySkippedUncounted} uncounted), ` +
         `barrier peak deferred ${snapshot.stream.barrier.peakDeferred}/${MAX_DEFERRED_REPORTED} ` +
