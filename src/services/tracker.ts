@@ -202,6 +202,10 @@ export type TrackerEventName =
    * ~194ms to confirm what `err` already said, not to stop knowing about it.
    */
   | 'stream-tx-failed-skipped'
+  /** An exit signal arrived while the entry for that mint was still in flight. */
+  | 'exit-latched'
+  /** A latched exit became a sell intent, was discarded, or aged out. */
+  | 'exit-latch-resolved'
   /**
    * One signature's trip through the RPC null window: attempts and elapsed ms.
    * The detection leg of CLAUDE.md gap 6, and a LOWER BOUND on copy delay.
@@ -491,6 +495,25 @@ export class Tracker extends EventEmitter {
    * promote the bot, while a stray `connected` after `stop()` does not.
    */
   private wantRunning = false;
+  /**
+   * Mints with a buy this tracker has submitted and not yet resolved.
+   *
+   * The guard layer has its own in-flight claim, but it is private to
+   * `guarded()` and exists to serialise gates. This one answers a different
+   * question: has the strategy already committed to entering this mint.
+   */
+  private readonly entriesInFlight = new Map<Address, number>();
+  /**
+   * An exit signal that arrived while this process was still entering.
+   *
+   * Measured on 2026-08-11: the one completed trade bought a mint its source
+   * wallet sold ONE SLOT later. The exit arrived 316ms after the entry signal
+   * and 1,022ms BEFORE this process's own buy filled, so `mirror` saw no open
+   * position, correctly returned null, and the exit was gone. Guard gate 1
+   * refuses a sell with no position — also correctly. The defect is that no
+   * intent was ever created, not that one was refused.
+   */
+  private readonly exitLatch = new Map<Address, { swap: TrackedSwap; latchedAt: UnixMillis }>();
   private priceTickRunning = false;
   private screenTickRunning = false;
 
@@ -509,7 +532,19 @@ export class Tracker extends EventEmitter {
    */
   private recorder: SessionRecorder | undefined;
 
-  readonly stats = { priceTicks: 0, screenTicks: 0, intents: 0, fills: 0, rejections: 0 };
+  readonly stats = {
+    priceTicks: 0,
+    screenTicks: 0,
+    intents: 0,
+    fills: 0,
+    rejections: 0,
+    /** Latched exits that became a sell intent when the entry filled. */
+    exitLatchFired: 0,
+    /** Latched exits dropped because the entry never became a position. */
+    exitLatchDiscarded: 0,
+    /** Latched exits dropped because they aged out before the entry resolved. */
+    exitLatchExpired: 0,
+  };
 
   constructor(deps: TrackerDeps) {
     super();
@@ -964,6 +999,10 @@ export class Tracker extends EventEmitter {
       ...(intent.signalAgeMs === undefined ? {} : { signalAgeMs: intent.signalAgeMs }),
     });
 
+    if (intent.side === 'buy') {
+      this.entriesInFlight.set(intent.mint, (this.entriesInFlight.get(intent.mint) ?? 0) + 1);
+    }
+
     const work = (async (): Promise<Fill> => {
       try {
         const fill = await this.broker.execute(intent);
@@ -981,6 +1020,7 @@ export class Tracker extends EventEmitter {
 
         this.stats.fills += 1;
         this.record('fill', fill);
+        if (intent.side === 'buy') this.releaseEntry(intent.mint, 'filled');
         return fill;
       } catch (cause) {
         // Already recorded, resolved and emitted by `refuse`.
@@ -1018,14 +1058,38 @@ export class Tracker extends EventEmitter {
           // run and resolved this itself, that resolution is the accurate one
           // and must not be relabelled by whoever unwinds last.
           if (this.deps.ledger.getIntentStatus(intent.id) === 'pending') {
-            this.deps.ledger.resolveIntent(
-              intent.id,
-              'failed',
-              (cause as Error).name || 'EXECUTION_ERROR',
-              this.now(),
-            );
+            const code = (cause as Error).name || 'EXECUTION_ERROR';
+            this.deps.ledger.resolveIntent(intent.id, 'failed', code, this.now());
+
+            // AND a decision line, because this is a refusal and was invisible.
+            //
+            // Measured on 2026-08-11: 49 of 205 entry intents — 24% of
+            // everything that did not fill — resolved here as
+            // `QuoteUnavailableError` and produced no `decision` record at all.
+            // Reconciling the trading path needed the ledger, `guardRejectionsByCode`
+            // undercounted by a quarter, and the largest single reason an entry
+            // did not happen was absent from the one artifact anybody reads.
+            //
+            // `UPSTREAM_UNAVAILABLE` rather than the raw error name: the code is
+            // the machine-readable bucket and the name is the detail. Kept
+            // distinct from a `GuardRejection` code because nothing was refused
+            // on its merits — the guard layer could not reach the data it needed
+            // to decide. That distinction is the same one handoff 08 draws
+            // between SCREEN_FAILED and SCREEN_UNKNOWN, and collapsing it would
+            // make an upstream outage read as an adversarial market.
+            this.stats.rejections += 1;
+            this.record('rejection', {
+              intentId: intent.id,
+              side: intent.side,
+              mint: intent.mint,
+              code: 'UPSTREAM_UNAVAILABLE',
+              rejectionCode: `UPSTREAM_UNAVAILABLE:${code}`,
+              reason: (cause as Error).message,
+              ...(intent.signalAgeMs === undefined ? {} : { signalAgeMs: intent.signalAgeMs }),
+            } satisfies RejectionEvent);
           }
         }
+        if (intent.side === 'buy') this.releaseEntry(intent.mint, 'unfilled');
         throw cause;
       }
     })();
@@ -1118,6 +1182,70 @@ export class Tracker extends EventEmitter {
    * after `stop()` has begun, and a stopped bot must not be restarted by its own
    * socket coming back.
    */
+  /**
+   * An entry finished. Fire or drop whatever exit was waiting on it.
+   *
+   * A latch that silently evaporates is the same defect as the 49 invisible
+   * intents, so every outcome is counted and recorded: fired, discarded because
+   * the entry never became a position, or expired.
+   *
+   * BOUNDED BY `maxSignalAgeMs`. A latched exit is a signal like any other and
+   * the system already has a number for how long one is worth acting on — gate 3
+   * would refuse it on exactly that basis a moment later. Reusing the derived
+   * constant rather than inventing a second expiry keeps one definition of
+   * stale.
+   *
+   * The fired intent is an ORDINARY sell through `submit()` and the guards. No
+   * bypass: sells are never blocked by risk limits, so the existing path is
+   * already sufficient, and the bug was that no intent existed at all.
+   */
+  private releaseEntry(mint: Address, outcome: 'filled' | 'unfilled'): void {
+    const remaining = (this.entriesInFlight.get(mint) ?? 1) - 1;
+    if (remaining <= 0) this.entriesInFlight.delete(mint);
+    else this.entriesInFlight.set(mint, remaining);
+
+    const latched = this.exitLatch.get(mint);
+    if (latched === undefined) return;
+    this.exitLatch.delete(mint);
+
+    const ageMs = this.now() - latched.latchedAt;
+    if (ageMs > this.deps.config.maxSignalAgeMs) {
+      this.stats.exitLatchExpired += 1;
+      this.record('exit-latch-resolved', { mint, outcome: 'expired', ageMs });
+      return;
+    }
+    if (outcome !== 'filled') {
+      this.stats.exitLatchDiscarded += 1;
+      this.record('exit-latch-resolved', { mint, outcome: 'discarded', ageMs });
+      return;
+    }
+
+    const position = this.deps.ledger.getPosition(mint);
+    if (position === undefined || position.state !== 'open' || position.tokens <= 0n) {
+      this.stats.exitLatchDiscarded += 1;
+      this.record('exit-latch-resolved', { mint, outcome: 'no-position', ageMs });
+      return;
+    }
+
+    this.stats.exitLatchFired += 1;
+    this.record('exit-latch-resolved', { mint, outcome: 'fired', ageMs });
+    const sell: OrderIntent = {
+      id: `exit-latch-${mint}-${this.now()}`,
+      side: 'sell',
+      mint,
+      amountTokens: position.tokens,
+      maxSlippageBps: this.deps.config.maxSlippageBps,
+      reason: `latched exit: source sold while the entry was in flight`,
+    };
+    // Tracked so `stop()` waits for it, like every other in-flight intent.
+    const work = this.submit(sell).catch((cause: unknown) => {
+      this.recordError(cause as Error, `latched exit ${mint}`);
+      return undefined;
+    });
+    this.inFlight.add(work as Promise<unknown>);
+    void (work as Promise<unknown>).finally(() => this.inFlight.delete(work as Promise<unknown>));
+  }
+
   private onConnected(): void {
     if (!this.wantRunning) return;
     if (this.status === 'running') return;
@@ -1373,6 +1501,20 @@ export class Tracker extends EventEmitter {
 
     const driver = this.driver;
     if (driver === null || this.status !== 'running') return;
+
+    // An exit for a mint we are still entering cannot become a sell intent yet
+    // — there is no position, and gate 1 refuses a sell without one. Held
+    // against the mint instead, and fired the moment the entry resolves filled.
+    // The alternative, which is what happened, is that the signal evaporates.
+    if (
+      swap.side === 'sell' &&
+      this.entriesInFlight.has(swap.mint) &&
+      this.deps.ledger.getPosition(swap.mint)?.state !== 'open'
+    ) {
+      this.exitLatch.set(swap.mint, { swap, latchedAt: this.now() });
+      this.record('exit-latched', { mint: swap.mint, wallet: swap.wallet, at: this.now() });
+      return;
+    }
 
     // Tracked in `inFlight` so `stop()` waits for it. The runner's 500ms
     // timeout bounds that wait, and the alternative — a strategy call still

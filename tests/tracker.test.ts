@@ -1781,3 +1781,106 @@ describe('running is bound to the feed, not to start() returning', () => {
     expect(h.events.filter((event) => event.type === 'stream-connected')).toHaveLength(1);
   });
 });
+
+// ---------------------------------------------------------------------------
+// An exit that arrives mid-entry
+// ---------------------------------------------------------------------------
+
+describe('the discarded exit', () => {
+  const settle = async (n = 12): Promise<void> => {
+    for (let i = 0; i < n; i += 1) await new Promise((r) => setImmediate(r));
+  };
+
+  /**
+   * The latch sits on the strategy path, behind the same `driver === null`
+   * check as strategy dispatch — deliberately. A tracker with no strategy is a
+   * pure observer, and it must not start selling on its own because an operator
+   * happened to have a manual buy in flight.
+   */
+  function attachStub(h: Harness): void {
+    const driver = new EventEmitter() as unknown as Parameters<
+      typeof h.tracker.useStrategy
+    >[0];
+    (driver as unknown as { onTrackedSwap: () => Promise<void> }).onTrackedSwap = async () =>
+      undefined;
+    h.tracker.useStrategy(driver);
+  }
+
+  /** A swap for MINT_A on the given side, live and fresh. */
+  function swapOn(side: 'buy' | 'sell'): TrackedSwap {
+    return {
+      wallet: '7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU',
+      mint: MINT_A,
+      side,
+      solAmount: 1_000_000_000n,
+      tokenAmount: 1_000_000_000n,
+      decimals: DECIMALS,
+      signature: `sig-${side}`,
+      slot: 1,
+      blockTime: null,
+      venue: 'pumpfun',
+      feePayer: true,
+      source: 'live',
+      observedAt: NOW,
+    };
+  }
+
+  it('fires the sell once the entry fills, exactly once', async () => {
+    const h = open({ canSell: async () => ({ ok: true }) });
+    attachStub(h);
+    await h.tracker.start();
+
+    // An entry is in flight for MINT_A when the source's exit arrives.
+    const entry = h.tracker.submit(buyIntent());
+    await Promise.resolve();
+    h.stream.emit('swap', swapOn('sell'));
+
+    await entry;
+    await settle();
+
+    expect(h.tracker.stats.exitLatchFired).toBe(1);
+    // An ordinary sell through submit() and the guards — no bypass.
+    const sells = h.brokerCalls.execute.filter((call) => call.side === 'sell');
+    expect(sells).toHaveLength(1);
+    expect(h.ledger.getPosition(MINT_A)?.state).toBe('closed');
+  });
+
+  it('discards and COUNTS the latch when the entry never becomes a position', async () => {
+    const h = open({ canSell: async () => ({ ok: true }) });
+    attachStub(h);
+    await h.tracker.start();
+    h.tracker.killSwitch();
+
+    // Refused at gate 1, so no position ever exists.
+    const entry = h.tracker.submit(buyIntent()).catch(() => undefined);
+    await Promise.resolve();
+    h.stream.emit('swap', swapOn('sell'));
+    await entry;
+    await settle();
+
+    expect(h.tracker.stats.exitLatchFired).toBe(0);
+    expect(h.tracker.stats.exitLatchDiscarded).toBe(1);
+    // A latch that evaporates silently is the same defect as the 49 invisible
+    // intents, so the discard is recorded rather than merely not happening.
+    expect(
+      h.events.filter((e) => e.type === 'exit-latch-resolved'),
+    ).toHaveLength(1);
+    expect(h.brokerCalls.execute.filter((c) => c.side === 'sell')).toHaveLength(0);
+  });
+
+  it('leaves the ordinary path alone when the exit arrives after the fill', async () => {
+    const h = open({ canSell: async () => ({ ok: true }) });
+    attachStub(h);
+    h.ledger.recordFill(buyFill());
+    await h.tracker.start();
+
+    // Nothing in flight: the position is already open, so this is the existing
+    // strategy path and must not be latched or doubled.
+    h.stream.emit('swap', swapOn('sell'));
+    await settle();
+
+    expect(h.tracker.stats.exitLatchFired).toBe(0);
+    expect(h.tracker.stats.exitLatchDiscarded).toBe(0);
+    expect(h.events.filter((e) => e.type === 'exit-latched')).toHaveLength(0);
+  });
+});
