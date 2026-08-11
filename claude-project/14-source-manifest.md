@@ -1,6 +1,6 @@
 # Source manifest — what is and is not in this Project
 
-> Generated from commit `804724b` on 2026-08-10.
+> Generated from commit `0a078be` on 2026-08-11.
 
 The repo is ~14,000 lines of TypeScript. Bundling all of it would crowd out the
 documents that actually explain the system, so the bundle is curated. If a
@@ -24,7 +24,7 @@ question turns on a file listed as omitted below, **say so rather than guessing*
 - `src/services/tracker.ts`
 - `src/strategies/mirror.ts`
 
-## Omitted (23 files)
+## Omitted (24 files)
 
 - `src/adapters/dexscreener.ts`
 - `src/adapters/jupiter.ts`
@@ -47,6 +47,7 @@ question turns on a file listed as omitted below, **say so rather than guessing*
 - `src/services/ledgerDurability.ts`
 - `src/services/strategyRegistry.ts`
 - `src/services/strategyRunner.ts`
+- `src/services/walletScores.ts`
 - `src/services/walletStore.ts`
 - `src/strategies/equation.ts`
 

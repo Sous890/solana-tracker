@@ -1,6 +1,6 @@
 # Source — core types, guards, persistence
 
-> Generated from commit `804724b` (fix: two defects the soak found, one of them introduced by the barrier) on 2026-08-10.
+> Generated from commit `0a078be` (feat: refuse a wallet we cannot copy, where the decision is made) on 2026-08-11.
 > Regenerate with `npx tsx scripts/bundle-for-claude.ts`. Do not edit by hand.
 
 The trading invariants and the two SQLite stores. `guards.ts` is where the entry/exit asymmetry lives and is the single most important file in the repo. `cursors.ts` holds the gap-fill barrier added in session 25.

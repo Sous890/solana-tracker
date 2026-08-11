@@ -1,6 +1,6 @@
 # Source — strategy and entry points
 
-> Generated from commit `804724b` (fix: two defects the soak found, one of them introduced by the barrier) on 2026-08-10.
+> Generated from commit `0a078be` (feat: refuse a wallet we cannot copy, where the decision is made) on 2026-08-11.
 > Regenerate with `npx tsx scripts/bundle-for-claude.ts`. Do not edit by hand.
 
 The only strategy that exists, and how a soak is actually launched.

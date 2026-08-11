@@ -1,6 +1,6 @@
 # Source — the feed
 
-> Generated from commit `804724b` (fix: two defects the soak found, one of them introduced by the barrier) on 2026-08-10.
+> Generated from commit `0a078be` (feat: refuse a wallet we cannot copy, where the decision is made) on 2026-08-11.
 > Regenerate with `npx tsx scripts/bundle-for-claude.ts`. Do not edit by hand.
 
 How swaps get from the chain into the system. `walletStream.ts` owns the socket, the gap fill, the reconnect chain and the dedupe; `swapParser.ts` turns a transaction into a swap or a reason code.
@@ -117,6 +117,121 @@ export const BACKOFF_MIN_MS = 1_000;
 export const BACKOFF_MAX_MS = 30_000;
 /** Bound on history replayed when the cursor is unusable. */
 export const MAX_COLD_FILL = 100;
+/**
+ * Bound on history replayed when the cursor IS usable.
+ *
+ * ── DERIVED IN SESSION 25, AGAINST ENTRY LATENCY RATHER THAN SAFETY ───────
+ *
+ * This used to be unbounded, because the `MAX_COLD_FILL` check is gated on
+ * `cursor === undefined`. Session 25's soak paid for that: one wallet ran 20,045
+ * serial fetches with 77,236 slots reserved and was still going at shutdown, and
+ * the socket never connected at all across a 132.3-minute window.
+ *
+ * **What this bound is for, since d40fc56.** `ensurePriceLoop()` now runs before
+ * `stream.start()`, so a long fill no longer strands held positions — stop-loss,
+ * take-profit and `route-lost` all survive it. What it does NOT survive is entry
+ * latency: `start()` still does not return while a warm fill runs, so `status`
+ * stays `idle`, guard gate 2 refuses every buy, and a 132-minute fill is still
+ * 132 minutes of zero entries. That is the cost this bound buys down.
+ *
+ * ── 1. THE BOUND COUNTS FETCHABLE CANDIDATES, NOT SIGNATURES ─────────────
+ *
+ * 100 transactions **worth fetching** — entries whose `err` is null. Failures
+ * ride along free: their determination is already in the notification, they cost
+ * no fetch, and counting them against the bound would throw away real candidates
+ * to make room for transactions nobody has to look at. Measured 2026-08-11, that
+ * distinction is most of the population: **92.5% of all fetched transactions
+ * were TX_FAILED** (5,931 of 6,409), and for one wallet 99.7%, with zero parsed
+ * swaps from 5,965 fetches. Bounding raw signatures measured the wrong quantity.
+ *
+ * The claim behind the size is that replayed history has no trading value beyond
+ * the first seconds, and the system already asserts it: `maxSignalAgeMs` is
+ * 15,000ms and guard gate 3 refuses anything older, while `MirrorStrategy`
+ * deliberately does not filter on age so a stale replay becomes a `STALE_SIGNAL`
+ * rejection rather than a trade. The 2026-08-11 run recorded **137** of those,
+ * which is that gate doing its job on the startup backlog.
+ *
+ * The alpha-decay harness (handoff 16) gives the shape — mean forward return by
+ * entry delay, **n=119 round trips over 20 days on one wallet**:
+ *
+ *     delay      0s     15s     30s     60s    120s
+ *     mean    16.24%  10.70%   9.08%   6.45%   5.82%
+ *
+ * Down 34% by the 15s gate and 60% by 60s. One wallet and 119 trips establishes
+ * direction, not a half-life — but every candidate bound sits far right of the
+ * 15s cliff, so the choice is not sensitive to that.
+ *
+ * Coverage over **n=842 `gap-filled` events, 12 sessions to 2026-08-09**: p50
+ * 16, p75 45, p90 100, p99 675, max 7,822. Most fills are unaffected.
+ *
+ * ── 2. THE AGGREGATE STARTUP COST, WHICH IS STILL LARGE ───────────────────
+ *
+ * `gapFillAll()` is serial across 13 wallets, so the worst case is 13 x 100 =
+ * **1,300 fetches before `start()` returns**. At the measured mean gap-fill
+ * fetch of 194ms (p50 158ms, p90 206ms, **n=47,684**) that is **~4.2 minutes**,
+ * or ~4.5 at p90.
+ *
+ * Measured on the 2026-08-11 run: **13/13 wallets filled in 4.33 minutes**,
+ * against never completing in either of the two runs before it.
+ *
+ * Four minutes of reduced entry capacity is not a good number and is not
+ * presented as one. **The cost figure that used to sit here — "1.40 swaps/min,
+ * roughly six missed signals" — was wrong and is withdrawn.** It came from
+ * `fetch-window` events, which only exist for signatures that were actually
+ * fetched, so it could not see anything the bounded queue shed. The same run
+ * shed **242,924** signatures, of which **0.17% were ever recovered**. The true
+ * arrival rate is orders of magnitude higher than that figure implied; the live
+ * parsed-swap rate, which is the quantity that actually matters, was **1.09/min
+ * across 13 wallets over 132 minutes**.
+ *
+ * The fix that removes the remaining cost is concurrency across wallets, not a
+ * smaller per-wallet cap. **This number belongs in the re-soak gate**: expect
+ * ~4 minutes, and if a run sees much more the bound is not working.
+ *
+ * ── 3. THE IMPLIED CEILING ON `Barrier.peakOutstanding` ───────────────────
+ *
+ * `reserve()` is called once per wallet with exactly the entries about to be
+ * handled, so a bounded fill bounds the reservation: **peakOutstanding <= 100**,
+ * against 77,236 observed. That matters because the barrier was quadratic in the
+ * reservation until 804724b — at 77,236 it cost 1.611ms per completion, ~124s of
+ * CPU for one wallet. It is linear now, but this bound means the pathological
+ * input can no longer be constructed at all.
+ *
+ * `MAX_DEFERRED` stays at 4,096, now ~40x the ceiling it guards. Left alone
+ * deliberately: deferral is driven by live deliveries landing above the barrier,
+ * not by reservation size, and prompt 16 will make those land during the fill
+ * for the first time. At 1.40 swaps/min over a ~4 minute fill that is single
+ * digits, so 4,096 is wildly slack — but re-deriving a constant whose input is
+ * about to change, inside a commit that is meant to be one change, would be
+ * guessing twice. It is oversized, harmless, and flagged rather than adjusted.
+ *
+ * ── ORDER-INDEPENDENCE (prompt 16 moves `connectOnce` ahead of this) ──────
+ *
+ * The truncation path is order-independent and does not assume the socket is
+ * down. It reads only the cursor and the paged entries, and the cursor write
+ * that records the skip happens **after** `reserve()`, so it lands below the
+ * barrier and persists immediately while a concurrent live delivery for the same
+ * wallet — which sits above the barrier — stays deferred. A live delivery cannot
+ * therefore be mistaken for the truncation point, and the truncation point
+ * cannot overwrite a newer live position.
+ *
+ * The one thing that does change under prompt 16: the skipped window will be
+ * computed while new signatures are still arriving, so `toSlot` becomes "newest
+ * skipped at the moment of paging" rather than "newest skipped, full stop".
+ * That is already true of any gap fill and is why the event carries explicit
+ * slots instead of a count alone.
+ */
+export const MAX_WARM_FILL = 100;
+/**
+ * Hard ceiling on pages a warm fill will read looking for fetchable candidates.
+ *
+ * The bound above counts transactions worth fetching, so a wallet whose recent
+ * history is entirely failures would page towards the tip finding none. 40 pages
+ * is 40,000 signatures at ~200ms a page — about 8 seconds, against the ~19
+ * seconds the 100 fetches themselves cost. Reaching it marks the skipped count
+ * unknown, exactly as stopping early for any other reason does.
+ */
+export const MAX_WARM_PAGES = 40;
 /**
  * Entries retained by the seen set, which is keyed on `(wallet, signature)`.
  *
@@ -268,6 +383,23 @@ export interface FetchWindowEvent {
    * because it must be present even when the fetch returned nothing.
    */
   slot: number;
+  /**
+   * Time between `onMessage` handing this to the queue and its fetch starting.
+   *
+   * `drain()` is strictly serial — one `await handle()` at a time at a measured
+   * ~194ms — so residency is depth x fetch time, and a full queue of 20 puts
+   * ~3.7s in front of a notification before its fetch begins. Against a 15s
+   * freshness gate that is a quarter of the budget spent before the network is
+   * touched, and until now it was the one leg nothing recorded.
+   *
+   * **Live path only.** Gap fill calls `handle` directly and waits in no queue,
+   * so this is absent rather than zero there: "did not queue" and "queued for no
+   * time" are different facts and a zero would average into the first as if it
+   * were the second.
+   */
+  queuedMs?: number;
+  /** Queue length when this was enqueued, so residency reads against pressure. */
+  queueDepth?: number;
   /** 1 means it was fetchable immediately. */
   attempts: number;
   /** From first fetch attempt to the one that returned, in ms. */
@@ -328,6 +460,20 @@ export interface QueueOverflowEvent {
 }
 
 /**
+ * A socket is open and every subscribe has been sent.
+ *
+ * Distinct from `reconnected`, deliberately. That one means "an outage is over"
+ * and is emitted after the backfill; this one means "the feed is live" and is
+ * emitted the moment it is true, on the first connect as well as on every
+ * subsequent one. The tracker's `running` status is bound to this rather than to
+ * `start()` returning, so `running` cannot mean "we finished trying" — it means
+ * a socket exists and is subscribed.
+ */
+export interface ConnectedEvent {
+  at: UnixMillis;
+}
+
+/**
  * Why the stream is not connected.
  *
  * `phase` exists because these two were indistinguishable downstream and got
@@ -348,8 +494,112 @@ export interface DisconnectedEvent {
 export interface GapFilledEvent {
   wallet: Address;
   count: number;
-  /** True when the cursor was unusable and history was capped at MAX_COLD_FILL. */
+  /**
+   * True when the cursor was unusable and history was capped at
+   * `MAX_COLD_FILL`. **Cold truncation only.**
+   *
+   * A warm truncation does NOT set this — it emits `history-skipped` instead.
+   * The two are different facts: a cold truncation is "we had no idea where we
+   * were, so we took the newest 100 and started from there", while a warm one is
+   * "we knew exactly where we were and chose to abandon a measurable window".
+   * Only the second one means a cursor is now describing a position the process
+   * never actually delivered, and a later measurement has to be able to count
+   * them apart without inspecting a flag on an event that means neither.
+   */
   truncated: boolean;
+}
+
+/**
+ * A warm gap fill deliberately abandoned part of its backlog.
+ *
+ * ── WHY THIS IS AN EVENT AND NOT A FLAG ───────────────────────────────────
+ *
+ * The cursor barrier exists to make it impossible for a cursor to advance past
+ * history that was never handled. This does exactly that on purpose. The two
+ * must be impossible to confuse, so the deliberate one announces itself with its
+ * own type, its own slot range, and its own digest finding — an ACKNOWLEDGED
+ * gap. The alternative is a cursor that silently describes a position the
+ * process never delivered, which is the failure the barrier was built for.
+ *
+ * `fromSlot`/`toSlot` bound the abandoned window and `count` is exact: paging
+ * runs to completion before truncation, so the whole skipped range is known.
+ * That costs one `getSignaturesForAddress` page per 1,000 skipped signatures —
+ * ~78 calls on the worst backlog observed, against the 20,045 `getTransaction`
+ * calls the bound removes — which is a good trade for being able to say exactly
+ * how much history was dropped and where.
+ */
+/**
+ * A transaction the notification already reported as failed, not fetched.
+ *
+ * A non-null `err` means it failed on chain, which means it moved no balances,
+ * which means `parseSwap` can only ever answer `TX_FAILED`. Fetching to confirm
+ * that costs ~194ms against a ~5/sec budget AND a slot in a global queue that
+ * sheds oldest-first, so it does not merely waste capacity — it evicts other
+ * wallets' real swaps.
+ *
+ * Measured 2026-08-11: **92.5% of all fetched transactions were TX_FAILED**
+ * (5,931 of 6,409), one wallet running at 99.7% and contributing **zero** parsed
+ * swaps from 5,965 fetches, while the twelve productive wallets lost up to
+ * **42.6%** of their own traffic to eviction.
+ *
+ * COUNTED, NOT DROPPED. The comment this replaces said failures go through the
+ * parser "so it surfaces as TX_FAILED rather than vanishing", and that reasoning
+ * is right — this codebase counts what it discards everywhere else. The
+ * requirement is to stop FETCHING them, not to stop knowing about them, so the
+ * classification is emitted here instead of being inferred from a fetch.
+ *
+ * This is also strictly less recorder traffic than before: a failed transaction
+ * used to write a `fetch-window` AND a `swap-unparsed` record, and now writes
+ * one.
+ */
+/**
+ * Where the time in front of a swap was spent.
+ *
+ * `FetchWindowEvent`'s own comment says it is a LOWER BOUND on copy delay and
+ * excludes quote, guard and fill time — and it also excluded the queue wait
+ * ahead of it, so the budget gate 3 judges was unmeasured at both ends. With
+ * these legs plus `blockTime` and `observedAt`, the age the gate reads splits
+ * into: time to reach this process, time queued, time fetching, and the
+ * remainder between dispatch and the intent being stamped.
+ *
+ * Carried on the `swap` emit rather than added to `TrackedSwap`, which is a core
+ * type and describes the trade, not how this process came to hear about it.
+ */
+export interface SwapDelayBreakdown {
+  fetchStartedAt: UnixMillis;
+  fetchMs: number;
+  /** Live path only — gap fill waits in no queue. See `FetchWindowEvent`. */
+  queuedMs?: number;
+  queueDepth?: number;
+}
+
+export interface TxFailedSkippedEvent {
+  wallet: Address;
+  signature: string;
+  slot: number;
+  /** Whatever the notification or the signature entry carried. Opaque. */
+  err: unknown;
+  source: SwapSource;
+}
+
+export interface HistorySkippedEvent {
+  wallet: Address;
+  /** Oldest abandoned slot. */
+  fromSlot: number;
+  /** Newest abandoned slot. The cursor now stands here. */
+  toSlot: number;
+  /**
+   * Abandoned signatures, or **null when paging stopped before the window was
+   * fully enumerated**.
+   *
+   * Nullable rather than a lower bound wearing a plain number, because a
+   * count that silently means "at least" is the shape that gets summed into a
+   * total and reported as fact. `fromSlot`/`toSlot` bound the window exactly
+   * either way; only the population inside it is unknown.
+   */
+  count: number | null;
+  /** The bound that produced this, so the event says what it was measured against. */
+  bound: number;
 }
 
 export class WalletStream extends EventEmitter {
@@ -398,11 +648,21 @@ export class WalletStream extends EventEmitter {
    * whoever happens to hold that number now".
    */
   private subscriptions = new Map<number, Address>();
-  private readonly queue: Array<{ wallet: Address; entry: SignatureEntry; source: SwapSource }> = [];
+  private readonly queue: Array<{
+    wallet: Address;
+    entry: SignatureEntry;
+    source: SwapSource;
+    /** When `onMessage` handed it over. The start of the measurable budget. */
+    enqueuedAt: UnixMillis;
+    /** Queue length at that instant, so residency can be read against pressure. */
+    depthAtEnqueue: number;
+  }> = [];
   private socket: StreamSocket | undefined;
   private running = false;
   /** One reconnect loop at a time. See `beginReconnect`. */
   private reconnecting = false;
+  /** Serializes wallet-loop passes. See `gapFillAll`. */
+  private fillChain: Promise<void> = Promise.resolve();
   /** A socket death that arrived while a reconnect was already in flight. */
   private reconnectRequested = false;
   private draining = false;
@@ -423,12 +683,40 @@ export class WalletStream extends EventEmitter {
 
   // -- lifecycle ------------------------------------------------------------
 
+  /**
+   * Connect first, then backfill — the same order as `reconnect()`.
+   *
+   * This used to fill and then connect, which meant the whole startup backlog
+   * was replayed with no socket: session 25 spent 132 minutes filling and never
+   * connected at all, and every swap that happened in that window was missed
+   * outright rather than merely late.
+   *
+   * `MAX_WARM_FILL` is what makes this safe to invert. The startup fill is
+   * bounded at 100 entries per wallet, so the socket is live for a ceiling of
+   * 1,300 serial fetches — ~4.2 minutes at the measured 194ms mean — rather than
+   * for an open-ended replay. **Every claim in `gapFillAll` about a live socket
+   * during the fill is scoped by that bound; raising it puts them all back in
+   * play.**
+   *
+   * A failed connect hands off to the reconnect chain and STILL backfills.
+   * Returning early would skip the backlog entirely on the one path where the
+   * process has most likely been down the longest.
+   */
   async start(): Promise<void> {
     this.running = true;
+    if (!(await this.connectOnce())) this.beginReconnect();
+
     // Gap fill on startup as well as on reconnect: the process may have been
     // down for any length of time, and the cursor is the only record of that.
     await this.gapFillAll();
-    if (!(await this.connectOnce())) this.beginReconnect();
+
+    // The socket can die inside the fill — that window is minutes long now, and
+    // this is the same lost-wakeup class 6ae46b0 fixed on the reconnect path.
+    // `reconnect()` handles it by continuing its retry loop; `start()` has no
+    // loop, so it must ask for one. Returning with no socket and no chain in
+    // flight would leave the process permanently silent with the feed simply
+    // looking quiet.
+    if (this.running && this.socket === undefined) this.beginReconnect();
   }
 
   /**
@@ -443,17 +731,68 @@ export class WalletStream extends EventEmitter {
    * advance 13's cursor past the window 13 is about to replay, and `until:`
    * returns only what is NEWER, so that window is skipped. No crash required.
    *
-   * `start()` is not exposed to that — there is no socket yet — but it takes the
-   * same hold, because the two paths differing in a property this subtle is how
-   * the next person reintroduces it.
+   * `start()` is exposed to exactly the same thing since it began connecting
+   * first. Both paths now take the identical hold, which is what makes the two
+   * orderings one code path rather than two with a subtle difference between
+   * them.
+   *
+   * ── THE WINDOW BETWEEN CONNECTING AND THE HOLD BEING TAKEN ────────────────
+   *
+   * A notification can arrive after `connectOnce()` resolves and before the hold
+   * loop below runs. `reconnect()` has relied on that window being harmless
+   * since it was written, without ever saying why, so: it is harmless because a
+   * live notification cannot write a cursor synchronously. `onMessage` parses
+   * and calls `enqueue`, which pushes and calls `void this.drain()`; `drain`
+   * awaits `handle`, which awaits `rpc.getTransaction` — measured at a 158ms p50
+   * and a 194ms mean — before `dispatch` reaches `cursors.set`. The hold loop
+   * below is synchronous and runs to completion in the same tick that called it.
+   * So the earliest possible cursor write from a notification arriving in that
+   * window is one full macrotask plus a network round trip after the hold is
+   * already in place.
+   *
+   * That is an argument from the shape of the code rather than a guarantee: it
+   * would stop holding if anything between `onMessage` and `cursors.set` ever
+   * became synchronous. Nothing on that path can be, since it is defined by a
+   * fetch, but it is the assumption to check first if a cursor is ever seen
+   * moving before its hold.
    */
   private async gapFillAll(): Promise<void> {
+    // SERIALIZED. Two wallet loops must never overlap.
+    //
+    // `start()` calls this directly rather than through `reconnect()`, so the
+    // `reconnecting` flag does not guard it — and now that the socket is live
+    // during the startup fill, a death inside that fill begins a reconnect whose
+    // own pass ran concurrently with it. Measured on 2026-08-10: the second
+    // pass's `hold` threw `already held`, its `finally` released all thirteen
+    // wallets INCLUDING the first pass's, and the first pass then died on
+    // `reserve without hold`, taking the process down 37 minutes in.
+    //
+    // The strict precondition added in a64422e did its job — it detected the
+    // concurrency — but detection that crashes the run is not what it was for.
+    // Chaining removes the concurrency instead of reporting it.
+    const previous = this.fillChain;
+    this.fillChain = (async () => {
+      // A failed pass must not poison the ones queued behind it.
+      await previous.catch(() => undefined);
+      if (!this.running) return;
+      await this.runGapFillPass();
+    })();
+    return this.fillChain;
+  }
+
+  private async runGapFillPass(): Promise<void> {
     const wallets = this.deps.wallets;
+    // Only what THIS pass actually took. Releasing by wallet list meant a pass
+    // that failed to acquire still released the holder's barriers.
+    const held: Address[] = [];
     try {
       // Inside the try, not before it. A blanket `hold` cannot persist and so
       // cannot throw today — but that is a fact about `flush`'s internals, and
       // the release guarantee should not depend on reading them.
-      for (const wallet of wallets) this.deps.cursors.hold(wallet);
+      for (const wallet of wallets) {
+        this.deps.cursors.hold(wallet);
+        held.push(wallet);
+      }
       for (const wallet of wallets) await this.gapFill(wallet);
     } finally {
       // Every hold, on every exit path: normal return, a throw out of any
@@ -464,7 +803,7 @@ export class WalletStream extends EventEmitter {
       //
       // Each release is isolated: one wallet's failure must not strand the
       // twelve behind it in the loop.
-      for (const wallet of wallets) {
+      for (const wallet of held) {
         try {
           this.deps.cursors.release(wallet);
         } catch (error) {
@@ -522,6 +861,13 @@ export class WalletStream extends EventEmitter {
           }),
         );
       }
+
+      // The socket is up and every subscribe has been sent. Emitted separately
+      // from `reconnected`, which fires only after the backfill and only on the
+      // reconnect path — this is "the feed is live", which is a different fact
+      // and, once `start()` connects before it fills, happens at a very
+      // different time from "the backfill finished".
+      this.emit('connected', { at: this.deps.now() } satisfies ConnectedEvent);
       return true;
     } catch (error) {
       this.emit('error', error as Error);
@@ -720,7 +1066,29 @@ export class WalletStream extends EventEmitter {
       return;
     }
 
-    this.enqueue(wallet, { signature: value.signature, slot, err: value.err ?? null }, 'live');
+    const err = value.err ?? null;
+    if (err !== null) {
+      // Classified here rather than after a fetch. See `TxFailedSkippedEvent`.
+      //
+      // No cursor write: the cursor means "the last position this process
+      // delivered", and nothing was delivered. Letting a failed live
+      // notification advance it would also let it jump past gap-fill history
+      // that has not been replayed, which is the loss mode the barrier exists
+      // for. The gap-fill path advances over failures instead, in order and
+      // under the barrier, so a wallet that emits nothing but failures still
+      // makes cursor progress.
+      this.seen.admit(seenKey(wallet, value.signature));
+      this.emit('tx-failed-skipped', {
+        wallet,
+        signature: value.signature,
+        slot,
+        err,
+        source: 'live',
+      } satisfies TxFailedSkippedEvent);
+      return;
+    }
+
+    this.enqueue(wallet, { signature: value.signature, slot, err }, 'live');
   }
 
   /**
@@ -729,7 +1097,13 @@ export class WalletStream extends EventEmitter {
    * a memory problem and a growing lag that never recovers.
    */
   private enqueue(wallet: Address, entry: SignatureEntry, source: SwapSource): void {
-    this.queue.push({ wallet, entry, source });
+    this.queue.push({
+      wallet,
+      entry,
+      source,
+      enqueuedAt: this.deps.now(),
+      depthAtEnqueue: this.queue.length,
+    });
     if (this.queue.length > MAX_IN_FLIGHT) {
       const dropped = this.queue.length - MAX_IN_FLIGHT;
       // `splice` returns what it removed, which is the only place the identity
@@ -760,7 +1134,10 @@ export class WalletStream extends EventEmitter {
       while (this.queue.length > 0) {
         const next = this.queue.shift();
         if (next === undefined) break;
-        await this.handle(next.wallet, next.entry, next.source);
+        await this.handle(next.wallet, next.entry, next.source, {
+          enqueuedAt: next.enqueuedAt,
+          depthAtEnqueue: next.depthAtEnqueue,
+        });
       }
     } finally {
       this.draining = false;
@@ -780,6 +1157,7 @@ export class WalletStream extends EventEmitter {
     wallet: Address,
     entry: SignatureEntry,
     source: SwapSource,
+    queued?: { enqueuedAt: UnixMillis; depthAtEnqueue: number },
   ): Promise<void> {
     // Both sets are keyed on the PAIR. One transaction can genuinely belong to
     // two tracked wallets — the trader and the counterparty — and a
@@ -817,6 +1195,12 @@ export class WalletStream extends EventEmitter {
         wallet,
         signature: entry.signature,
         slot: entry.slot,
+        // Absent on the gap-fill path, which calls `handle` directly and waits
+        // in no queue. Distinguished from zero on purpose: "did not queue" and
+        // "queued for no time" are different facts.
+        ...(queued === undefined
+          ? {}
+          : { queuedMs: startedAt - queued.enqueuedAt, queueDepth: queued.depthAtEnqueue }),
         attempts,
         elapsedMs: this.deps.now() - startedAt,
         resolved: tx !== null,
@@ -831,7 +1215,13 @@ export class WalletStream extends EventEmitter {
       // Admission now depends on what the transaction turned out to be, so it
       // happens AFTER the parse rather than before it. `inFlight` still covers
       // the whole window, so the two delivery paths cannot both process this.
-      const result = await this.dispatch(wallet, entry, tx, source);
+      const result = await this.dispatch(wallet, entry, tx, source, {
+        fetchStartedAt: startedAt,
+        fetchMs: this.deps.now() - startedAt,
+        ...(queued === undefined
+          ? {}
+          : { queuedMs: startedAt - queued.enqueuedAt, queueDepth: queued.depthAtEnqueue }),
+      });
 
       // `WALLET_NOT_IN_TX` is deliberately NOT admitted.
       //
@@ -874,6 +1264,7 @@ export class WalletStream extends EventEmitter {
     entry: SignatureEntry,
     tx: ParsedTransactionWithMeta,
     source: SwapSource,
+    delay: SwapDelayBreakdown,
   ): Promise<ParseResult> {
 
     // Stamped here, after the fetch, so `observedAt` is when this process
@@ -889,6 +1280,12 @@ export class WalletStream extends EventEmitter {
       this.emit('swap', result.swap, {
         solAmountPath: result.solAmountPath,
         pathDisagreement: result.pathDisagreement,
+        // The budget gate 3 judges, decomposed. `blockTime` is the chain edge
+        // and `observedAt` the moment this process had the transaction in hand,
+        // so with these two legs the age the gate reads splits into: time to
+        // reach us, time waiting in the queue, time fetching, and the remainder
+        // spent between dispatch and the intent being stamped.
+        delay,
       });
     } else {
       // Context alongside, the way `swap` already carries its parse metadata.
@@ -920,6 +1317,8 @@ export class WalletStream extends EventEmitter {
     const cursor = this.deps.cursors.get(wallet);
     const collected: SignatureEntry[] = [];
     let truncated = false;
+    /** False once paging stopped early, so the skipped count is unknowable. */
+    let countedFully = true;
     let before: Signature | undefined;
 
     try {
@@ -942,6 +1341,35 @@ export class WalletStream extends EventEmitter {
           break;
         }
 
+        // The warm bound applies to PAGING too, and it counts FETCHABLE
+        // candidates rather than raw signatures.
+        //
+        // Bounding only the entries handled left paging unbounded, on the
+        // reasoning that ~78 page calls was a good trade for an exact skipped
+        // count. That estimate came from a 77,236-entry backlog measured on a
+        // run whose socket never connected — so it never saw what a busy wallet
+        // actually emits. Measured on 2026-08-10: one wallet produced ~3,800
+        // notifications a minute, its 38-hour backlog ran to millions of
+        // signatures, and paging it had not finished after 37 minutes.
+        //
+        // Counting raw signatures then measured the wrong quantity: at that
+        // wallet's 99.7% failure rate, a hundred signatures is one fetchable
+        // candidate and ninety-nine determinations already in hand. The bound is
+        // about replay cost, and cost is fetches.
+        if (cursor !== undefined) {
+          const fetchable = collected.reduce((n, e) => n + (e.err === null ? 1 : 0), 0);
+          if (fetchable >= MAX_WARM_FILL) {
+            countedFully = false;
+            break;
+          }
+          // A wallet emitting nothing but failures would otherwise page to the
+          // tip looking for candidates that are not there.
+          if (collected.length >= MAX_WARM_PAGES * 1_000) {
+            countedFully = false;
+            break;
+          }
+        }
+
         before = page[page.length - 1]?.signature;
         if (before === undefined) break;
       }
@@ -957,13 +1385,102 @@ export class WalletStream extends EventEmitter {
       truncated = true;
     }
 
-    // Narrow the blanket hold to exactly what is about to be replayed. Until
-    // this line the wallet's cursor cannot move at all, because nothing knew
-    // what was outstanding; from here a 3,000-entry replay records progress as
-    // it goes, and only positions with an unhandled predecessor are held back.
+    // The warm bound. See `MAX_WARM_FILL` — this is an entry-latency decision,
+    // not a safety one, and it is the only place in the system that abandons
+    // history on purpose.
+    let skipped: SignatureEntry[] = [];
+    /** The position the abandoned window starts from. Warm path only. */
+    let skippedFromSlot = 0;
+    if (cursor !== undefined) {
+      // Keep the newest entries up to MAX_WARM_FILL FETCHABLE ones. Failures
+      // ride along free — they cost no fetch and their determination is already
+      // in hand — so counting them against the bound would throw away real
+      // candidates to make room for transactions nobody has to look at.
+      let fetchable = 0;
+      let cut = 0;
+      for (let i = entries.length - 1; i >= 0; i -= 1) {
+        if (entries[i]!.err === null) {
+          if (fetchable === MAX_WARM_FILL) {
+            cut = i + 1;
+            break;
+          }
+          fetchable += 1;
+        }
+      }
+      if (cut > 0) {
+        skipped = entries.slice(0, cut);
+        entries = entries.slice(cut);
+        skippedFromSlot = cursor.lastSlot;
+      }
+    }
+
+    // EVERY entry is reserved, failures included, and that is deliberate.
+    //
+    // A failed transaction needs no fetch but it is still a position this pass
+    // accounts for. Reserving it keeps the contiguous-prefix invariant intact
+    // with no special case: it is removed from `outstanding` the moment it is
+    // classified, exactly as a delivered entry is removed when it dispatches,
+    // so the cursor advances over it in order and never past an unhandled
+    // predecessor. Excluding failures instead would leave holes the cursor
+    // would step over silently — the thing the barrier exists to prevent.
     this.deps.cursors.reserve(wallet, entries.map((entry) => entry.slot));
 
-    for (const entry of entries) await this.handle(wallet, entry, 'gapfill');
+    if (skipped.length > 0) {
+      const newest = skipped[skipped.length - 1]!;
+
+      // AFTER `reserve`, and that ordering is the whole safety argument.
+      //
+      // Every skipped slot is below every kept slot, so this write sits below
+      // the barrier and persists immediately — while a live delivery for the
+      // same wallet, which sits above it, stays deferred. The truncation point
+      // therefore cannot overwrite a newer live position, and a live position
+      // cannot be mistaken for the truncation point. That holds whether or not a
+      // socket is connected, which is what makes this order-independent ahead of
+      // prompt 16.
+      //
+      // The cursor is advanced deliberately: the window is abandoned, so the
+      // decision has to be durable or the next start re-attempts it and pays the
+      // cost again. Announced first-class rather than left as a silent jump —
+      // this is the one place a cursor legitimately names a position the process
+      // never delivered, and it says so.
+      this.deps.cursors.set(wallet, newest.signature, newest.slot, this.deps.now());
+      this.emit('history-skipped', {
+        wallet,
+        // The last position actually delivered — the true start of the
+        // abandoned window, not merely the oldest signature paging happened to
+        // reach before it stopped.
+        fromSlot: skippedFromSlot,
+        toSlot: newest.slot,
+        count: countedFully ? skipped.length : null,
+        bound: MAX_WARM_FILL,
+      } satisfies HistorySkippedEvent);
+    }
+
+    for (const entry of entries) {
+      if (entry.err !== null) {
+        // Already determined. No fetch, and the cursor still advances — see the
+        // `reserve` note above and `TxFailedSkippedEvent`.
+        //
+        // ADMITTED to `seen`, unlike an unresolved fetch or a WALLET_NOT_IN_TX.
+        // Those two are withheld because they may be transient: a null fetch is
+        // a read replica lagging, and a mentions-only miss can be a degraded RPC
+        // response. A non-null `err` is neither — it is the chain's final answer
+        // about a transaction that is already settled, and it cannot become
+        // something else on a re-offer. Admitting makes the skip permanent
+        // because the determination is permanent.
+        this.seen.admit(seenKey(wallet, entry.signature));
+        this.emit('tx-failed-skipped', {
+          wallet,
+          signature: entry.signature,
+          slot: entry.slot,
+          err: entry.err,
+          source: 'gapfill',
+        } satisfies TxFailedSkippedEvent);
+        this.deps.cursors.set(wallet, entry.signature, entry.slot, this.deps.now());
+        continue;
+      }
+      await this.handle(wallet, entry, 'gapfill');
+    }
 
     const event: GapFilledEvent = { wallet, count: entries.length, truncated };
     this.emit('gap-filled', event);

@@ -1,6 +1,6 @@
 # Source — tracker, digest, recorder
 
-> Generated from commit `804724b` (fix: two defects the soak found, one of them introduced by the barrier) on 2026-08-10.
+> Generated from commit `0a078be` (feat: refuse a wallet we cannot copy, where the decision is made) on 2026-08-11.
 > Regenerate with `npx tsx scripts/bundle-for-claude.ts`. Do not edit by hand.
 
 `tracker.ts` is the orchestrator and holds the guard backstop. `soak.ts` is the digest — every alarm threshold in the system is in it. `recorder.ts` writes the session files that every measurement is made from.
@@ -93,7 +93,10 @@ import type {
 import { WRAPPED_SOL_MINT, baseUnitsToTokens, lamportsToSol } from '../core/units.js';
 import { openLedger } from '../db/ledger.js';
 import type { Ledger, ReconcileReport } from '../db/ledger.js';
+import { readFileSync } from 'node:fs';
 import { openCursorStore } from '../db/cursors.js';
+import { loadWalletScores } from './walletScores.js';
+import type { WalletScoreIndex, WalletScoresFile } from './walletScores.js';
 import type { CursorStore } from '../db/cursors.js';
 import { openRuntimeState } from '../db/runtimeState.js';
 import type { RuntimeState } from '../db/runtimeState.js';
@@ -200,8 +203,35 @@ export type TrackerEventName =
   | 'stream-disconnected'
   /** The wallet websocket came back, with the attempt count. */
   | 'stream-reconnected'
+  /**
+   * A socket is open and subscribed. Separately timestamped from the backfill
+   * that follows it, because once `start()` connects before it fills those are
+   * the two halves of startup and they have very different magnitudes.
+   */
+  | 'stream-connected'
   /** A gap fill completed, with how many signatures it recovered. */
   | 'stream-gap-filled'
+  /**
+   * A warm gap fill deliberately abandoned part of its backlog, with the slot
+   * range it dropped. An ACKNOWLEDGED gap — the one case where a cursor
+   * legitimately names a position this process never delivered.
+   */
+  | 'stream-history-skipped'
+  /**
+   * A transaction the notification already reported as failed, classified
+   * without a fetch. Counted rather than dropped — the point is to stop paying
+   * ~194ms to confirm what `err` already said, not to stop knowing about it.
+   */
+  | 'stream-tx-failed-skipped'
+  /** An exit signal arrived while the entry for that mint was still in flight. */
+  | 'exit-latched'
+  /** A latched exit became a sell intent, was discarded, or aged out. */
+  | 'exit-latch-resolved'
+  /**
+   * An ENTRY signal was refused on the wallet that produced it, before any
+   * intent existed. Carries the measured share and its `n`.
+   */
+  | 'signal-refused'
   /**
    * One signature's trip through the RPC null window: attempts and elapsed ms.
    * The detection leg of CLAUDE.md gap 6, and a LOWER BOUND on copy delay.
@@ -381,6 +411,12 @@ export interface TrackerDeps {
   logger: TrackerLogger;
   now?: () => UnixMillis;
   scheduler?: Scheduler;
+  /**
+   * Per-wallet copyability, written by the slow loop. Absent means every wallet
+   * is unscored and every entry signal is refused — which is the correct
+   * default, not a degraded one.
+   */
+  walletScores?: WalletScoresFile;
   priceIntervalMs?: number;
   screenIntervalMs?: number;
   heartbeatIntervalMs?: number;
@@ -483,6 +519,42 @@ export class Tracker extends EventEmitter {
   private priceHandle: unknown;
   private screenHandle: unknown;
   private heartbeatHandle: unknown;
+  /**
+   * The operator has asked for a run and has not asked for it to stop.
+   *
+   * Distinct from `status === 'running'`, which additionally requires a live
+   * socket. This is what makes a connect that succeeds on the third attempt
+   * promote the bot, while a stray `connected` after `stop()` does not.
+   */
+  private wantRunning = false;
+  /**
+   * Mints with a buy this tracker has submitted and not yet resolved.
+   *
+   * The guard layer has its own in-flight claim, but it is private to
+   * `guarded()` and exists to serialise gates. This one answers a different
+   * question: has the strategy already committed to entering this mint.
+   */
+  private readonly entriesInFlight = new Map<Address, number>();
+  /**
+   * An exit signal that arrived while this process was still entering.
+   *
+   * Measured on 2026-08-11: the one completed trade bought a mint its source
+   * wallet sold ONE SLOT later. The exit arrived 316ms after the entry signal
+   * and 1,022ms BEFORE this process's own buy filled, so `mirror` saw no open
+   * position, correctly returned null, and the exit was gone. Guard gate 1
+   * refuses a sell with no position — also correctly. The defect is that no
+   * intent was ever created, not that one was refused.
+   */
+  private readonly exitLatch = new Map<Address, { swap: TrackedSwap; latchedAt: UnixMillis }>();
+  /** Read per entry signal. A map lookup — the fast loop does no scoring. */
+  private readonly walletScores: WalletScoreIndex;
+  /** Admitted wallets whose source exited before our entry filled. See `onSwap`. */
+  private readonly lateOnAdmitted = new Map<Address, number>();
+
+  /** How often we arrived late on a wallet the gate admitted, by wallet. */
+  lateArrivals(): Record<string, number> {
+    return Object.fromEntries([...this.lateOnAdmitted].sort());
+  }
   private priceTickRunning = false;
   private screenTickRunning = false;
 
@@ -501,11 +573,24 @@ export class Tracker extends EventEmitter {
    */
   private recorder: SessionRecorder | undefined;
 
-  readonly stats = { priceTicks: 0, screenTicks: 0, intents: 0, fills: 0, rejections: 0 };
+  readonly stats = {
+    priceTicks: 0,
+    screenTicks: 0,
+    intents: 0,
+    fills: 0,
+    rejections: 0,
+    /** Latched exits that became a sell intent when the entry filled. */
+    exitLatchFired: 0,
+    /** Latched exits dropped because the entry never became a position. */
+    exitLatchDiscarded: 0,
+    /** Latched exits dropped because they aged out before the entry resolved. */
+    exitLatchExpired: 0,
+  };
 
   constructor(deps: TrackerDeps) {
     super();
     this.deps = deps;
+    this.walletScores = loadWalletScores(deps.walletScores);
     this.now = deps.now ?? (() => Date.now());
     this.scheduler = deps.scheduler ?? realScheduler;
     this.priceIntervalMs = deps.priceIntervalMs ?? PRICE_INTERVAL_MS;
@@ -567,6 +652,16 @@ export class Tracker extends EventEmitter {
     });
     deps.stream.on('reconnected', (payload: unknown) => {
       this.record('stream-reconnected', { ...(payload as object), at: this.now() });
+    });
+    deps.stream.on('connected', (payload: unknown) => {
+      this.record('stream-connected', { ...(payload as object), at: this.now() });
+      this.onConnected();
+    });
+    deps.stream.on('tx-failed-skipped', (payload: unknown) => {
+      this.record('stream-tx-failed-skipped', payload);
+    });
+    deps.stream.on('history-skipped', (payload: unknown) => {
+      this.record('stream-history-skipped', payload);
     });
     deps.stream.on('gap-filled', (payload: unknown) => {
       this.record('stream-gap-filled', payload);
@@ -660,10 +755,42 @@ export class Tracker extends EventEmitter {
         dirty: report.dirty,
       });
 
+      // BEFORE any network work, and deliberately not after it.
+      //
+      // Everything below this line can be slow or can hang: `stream.start()`
+      // gap fills every wallet before it connects, and warm fill is unbounded.
+      // On 2026-08-09 it did not finish inside 132 minutes, so the loops that
+      // used to be scheduled after it never started at all and the two
+      // positions this reconcile had just reported were left with no
+      // stop-loss, no take-profit and no `route-lost` for the whole run.
+      //
+      // The precondition is what the reconcile just found, not what the feed is
+      // doing. `ensureLoops()` below still starts it for a run that begins flat
+      // and acquires later, and `maybeStopLoops()` still tears it down only
+      // once idle AND flat.
+      if (report.openPositions.length > 0) this.ensurePriceLoop();
+
+      // Set before the await, because the promotion happens on the stream's
+      // `connected` event and that can fire while this call is outstanding.
+      this.wantRunning = true;
+
+      // Awaited, still — but only now that the exit monitor is scheduled, so a
+      // feed that never comes up delays entries without also blinding the book.
+      //
+      // `running` is NOT set here. It is bound to the socket being live — see
+      // `onConnected`. Guard gate 2 reads `status !== 'running'` to refuse
+      // entries, so what that gate is really asking is "is the feed up", and
+      // answering it with "`start()` returned" answered a different question:
+      // this call resolves even when `connectOnce()` failed and handed off to
+      // the reconnect chain, which promoted the bot to `running` with no socket
+      // at all and an open entry gate.
       await this.deps.stream.start();
 
       this.startedAt = this.now();
-      this.setStatus('running');
+      // Independent of the socket, deliberately. The screen loop re-screens held
+      // positions and the heartbeat drives silence detection; both are about
+      // this process being up rather than about the feed, so a connect that
+      // failed must not also cost the monitoring.
       this.ensureLoops();
 
       return report;
@@ -679,11 +806,19 @@ export class Tracker extends EventEmitter {
    * throwing, and why the monitoring loops outlive it.
    */
   async stop(): Promise<void> {
-    if (this.status === 'idle') return;
+    // `status === 'idle'` alone is no longer sufficient to mean "not running".
+    // Since `running` was bound to the socket, a run whose initial connect
+    // failed sits at `idle` with a reconnect chain in flight — and returning
+    // here would leave the stream retrying for the life of the process and
+    // `wantRunning` set, so the next `connected` would silently promote a bot
+    // the operator had stopped.
+    if (this.status === 'idle' && !this.wantRunning) return;
     if (this.stopping !== undefined) return this.stopping;
 
     this.stopping = (async () => {
       try {
+        // Cleared first, so a `connected` racing this teardown cannot promote.
+        this.wantRunning = false;
         // First, and before any await: `status !== 'running'` is what guard gate
         // 2 reads, so an entry racing this call is already refused. Sells are
         // untouched — `guardSell` never looks at status.
@@ -906,6 +1041,10 @@ export class Tracker extends EventEmitter {
       ...(intent.signalAgeMs === undefined ? {} : { signalAgeMs: intent.signalAgeMs }),
     });
 
+    if (intent.side === 'buy') {
+      this.entriesInFlight.set(intent.mint, (this.entriesInFlight.get(intent.mint) ?? 0) + 1);
+    }
+
     const work = (async (): Promise<Fill> => {
       try {
         const fill = await this.broker.execute(intent);
@@ -923,6 +1062,7 @@ export class Tracker extends EventEmitter {
 
         this.stats.fills += 1;
         this.record('fill', fill);
+        if (intent.side === 'buy') this.releaseEntry(intent.mint, 'filled');
         return fill;
       } catch (cause) {
         // Already recorded, resolved and emitted by `refuse`.
@@ -960,14 +1100,38 @@ export class Tracker extends EventEmitter {
           // run and resolved this itself, that resolution is the accurate one
           // and must not be relabelled by whoever unwinds last.
           if (this.deps.ledger.getIntentStatus(intent.id) === 'pending') {
-            this.deps.ledger.resolveIntent(
-              intent.id,
-              'failed',
-              (cause as Error).name || 'EXECUTION_ERROR',
-              this.now(),
-            );
+            const code = (cause as Error).name || 'EXECUTION_ERROR';
+            this.deps.ledger.resolveIntent(intent.id, 'failed', code, this.now());
+
+            // AND a decision line, because this is a refusal and was invisible.
+            //
+            // Measured on 2026-08-11: 49 of 205 entry intents — 24% of
+            // everything that did not fill — resolved here as
+            // `QuoteUnavailableError` and produced no `decision` record at all.
+            // Reconciling the trading path needed the ledger, `guardRejectionsByCode`
+            // undercounted by a quarter, and the largest single reason an entry
+            // did not happen was absent from the one artifact anybody reads.
+            //
+            // `UPSTREAM_UNAVAILABLE` rather than the raw error name: the code is
+            // the machine-readable bucket and the name is the detail. Kept
+            // distinct from a `GuardRejection` code because nothing was refused
+            // on its merits — the guard layer could not reach the data it needed
+            // to decide. That distinction is the same one handoff 08 draws
+            // between SCREEN_FAILED and SCREEN_UNKNOWN, and collapsing it would
+            // make an upstream outage read as an adversarial market.
+            this.stats.rejections += 1;
+            this.record('rejection', {
+              intentId: intent.id,
+              side: intent.side,
+              mint: intent.mint,
+              code: 'UPSTREAM_UNAVAILABLE',
+              rejectionCode: `UPSTREAM_UNAVAILABLE:${code}`,
+              reason: (cause as Error).message,
+              ...(intent.signalAgeMs === undefined ? {} : { signalAgeMs: intent.signalAgeMs }),
+            } satisfies RejectionEvent);
           }
         }
+        if (intent.side === 'buy') this.releaseEntry(intent.mint, 'unfilled');
         throw cause;
       }
     })();
@@ -1029,12 +1193,116 @@ export class Tracker extends EventEmitter {
 
   // -- the loops ------------------------------------------------------------
 
-  private ensureLoops(): void {
-    if (this.priceHandle === undefined) {
-      this.priceHandle = this.scheduler.setInterval(() => {
-        void this.priceTick();
-      }, this.priceIntervalMs);
+  /**
+   * The exit monitor. Its precondition is **positions exist**, not "the bot is
+   * running".
+   *
+   * Split out of `ensureLoops` because the two answer different questions.
+   * `priceTick` quotes the real exit for every open position and is what raises
+   * `route-lost`; a held position with no price loop has no stop-loss and no
+   * take-profit, and nothing is watching whether it can still be sold at all.
+   * None of that depends on the feed being up — it depends on holding something.
+   *
+   * Measured on 2026-08-09: `start()` awaited `stream.start()` before scheduling
+   * any loop, the gap fill did not finish, and **two open positions went 132
+   * minutes with no monitoring whatsoever**. The feed being slow is precisely
+   * when an operator is least able to react by hand, so it is the worst possible
+   * moment to also switch the alerts off.
+   */
+  /**
+   * The feed came up. Promote the run, if a run is what was asked for.
+   *
+   * `running` means "a socket is live and subscribed", not "`start()` finished
+   * trying". The difference is load-bearing because guard gate 2 refuses entries
+   * on `status !== 'running'`: under the old binding a failed initial connect
+   * still resolved `stream.start()`, so the bot went `running` with no socket at
+   * all and an open entry gate. Only the absence of any swaps to act on kept it
+   * from trading on a feed that was not there.
+   *
+   * Gated on `wantRunning` rather than on status alone, because the reconnect
+   * chain emits this on every successful connect — including ones that land
+   * after `stop()` has begun, and a stopped bot must not be restarted by its own
+   * socket coming back.
+   */
+  /**
+   * An entry finished. Fire or drop whatever exit was waiting on it.
+   *
+   * A latch that silently evaporates is the same defect as the 49 invisible
+   * intents, so every outcome is counted and recorded: fired, discarded because
+   * the entry never became a position, or expired.
+   *
+   * BOUNDED BY `maxSignalAgeMs`. A latched exit is a signal like any other and
+   * the system already has a number for how long one is worth acting on — gate 3
+   * would refuse it on exactly that basis a moment later. Reusing the derived
+   * constant rather than inventing a second expiry keeps one definition of
+   * stale.
+   *
+   * The fired intent is an ORDINARY sell through `submit()` and the guards. No
+   * bypass: sells are never blocked by risk limits, so the existing path is
+   * already sufficient, and the bug was that no intent existed at all.
+   */
+  private releaseEntry(mint: Address, outcome: 'filled' | 'unfilled'): void {
+    const remaining = (this.entriesInFlight.get(mint) ?? 1) - 1;
+    if (remaining <= 0) this.entriesInFlight.delete(mint);
+    else this.entriesInFlight.set(mint, remaining);
+
+    const latched = this.exitLatch.get(mint);
+    if (latched === undefined) return;
+    this.exitLatch.delete(mint);
+
+    const ageMs = this.now() - latched.latchedAt;
+    if (ageMs > this.deps.config.maxSignalAgeMs) {
+      this.stats.exitLatchExpired += 1;
+      this.record('exit-latch-resolved', { mint, outcome: 'expired', ageMs });
+      return;
     }
+    if (outcome !== 'filled') {
+      this.stats.exitLatchDiscarded += 1;
+      this.record('exit-latch-resolved', { mint, outcome: 'discarded', ageMs });
+      return;
+    }
+
+    const position = this.deps.ledger.getPosition(mint);
+    if (position === undefined || position.state !== 'open' || position.tokens <= 0n) {
+      this.stats.exitLatchDiscarded += 1;
+      this.record('exit-latch-resolved', { mint, outcome: 'no-position', ageMs });
+      return;
+    }
+
+    this.stats.exitLatchFired += 1;
+    this.record('exit-latch-resolved', { mint, outcome: 'fired', ageMs });
+    const sell: OrderIntent = {
+      id: `exit-latch-${mint}-${this.now()}`,
+      side: 'sell',
+      mint,
+      amountTokens: position.tokens,
+      maxSlippageBps: this.deps.config.maxSlippageBps,
+      reason: `latched exit: source sold while the entry was in flight`,
+    };
+    // Tracked so `stop()` waits for it, like every other in-flight intent.
+    const work = this.submit(sell).catch((cause: unknown) => {
+      this.recordError(cause as Error, `latched exit ${mint}`);
+      return undefined;
+    });
+    this.inFlight.add(work as Promise<unknown>);
+    void (work as Promise<unknown>).finally(() => this.inFlight.delete(work as Promise<unknown>));
+  }
+
+  private onConnected(): void {
+    if (!this.wantRunning) return;
+    if (this.status === 'running') return;
+    this.setStatus('running');
+  }
+
+  private ensurePriceLoop(): void {
+    if (this.priceHandle !== undefined) return;
+    this.priceHandle = this.scheduler.setInterval(() => {
+      void this.priceTick();
+    }, this.priceIntervalMs);
+  }
+
+  private ensureLoops(): void {
+    this.ensurePriceLoop();
     if (this.screenHandle === undefined) {
       this.screenHandle = this.scheduler.setInterval(() => {
         void this.screenTick();
@@ -1276,6 +1544,61 @@ export class Tracker extends EventEmitter {
     const driver = this.driver;
     if (driver === null || this.status !== 'running') return;
 
+    // An exit for a mint we are still entering cannot become a sell intent yet
+    // — there is no position, and gate 1 refuses a sell without one. Held
+    // against the mint instead, and fired the moment the entry resolves filled.
+    // The alternative, which is what happened, is that the signal evaporates.
+    if (
+      swap.side === 'sell' &&
+      this.entriesInFlight.has(swap.mint) &&
+      this.deps.ledger.getPosition(swap.mint)?.state !== 'open'
+    ) {
+      this.exitLatch.set(swap.mint, { swap, latchedAt: this.now() });
+      // We were too slow for this one, on a wallet the gate ADMITTED. An
+      // admitted wallet is not a wallet we are always fast enough for —
+      // C86oRMyU is admitted at a 19% uncopyable share and has a minimum hold
+      // of zero slots — so the digest counts how often it happens rather than
+      // letting the admission imply it does not.
+      this.lateOnAdmitted.set(swap.wallet, (this.lateOnAdmitted.get(swap.wallet) ?? 0) + 1);
+      this.record('exit-latched', { mint: swap.mint, wallet: swap.wallet, at: this.now() });
+      return;
+    }
+
+    // ── THE ADMISSION GATE, ON ENTRY SIGNALS ONLY ────────────────────────
+    //
+    // A wallet that closes its round trips faster than this process can enter
+    // them is not a source of signal, it is a source of losses: we pay the
+    // round trip to get in and the position is already gone. That is a fact
+    // about OUR latency, so it is refused here — where the decision to act is
+    // made — rather than only by editing `config.trackedWallets`, which is a
+    // file anybody can put a wallet back into.
+    //
+    // Buys only. An exit signal for a mint we hold must always get through:
+    // refusing it would strand a position on a wallet we stopped following,
+    // which is the one outcome the whole exit asymmetry exists to prevent. The
+    // price loop is untouched by construction — it never reads this path.
+    if (swap.side === 'buy') {
+      const refusal = this.walletScores.admit(swap.wallet);
+      if (refusal !== null) {
+        this.record('signal-refused', {
+          wallet: swap.wallet,
+          mint: swap.mint,
+          signature: swap.signature,
+          code: refusal.code,
+          reason: refusal.reason,
+          ...(refusal.code === 'WALLET_NOT_COPYABLE'
+            ? { uncopyableShare: refusal.uncopyableShare }
+            : {}),
+          roundTrips: refusal.roundTrips,
+        });
+        this.deps.logger.warn(
+          { wallet: swap.wallet, mint: swap.mint, code: refusal.code },
+          `Refused signal from ${swap.wallet}: ${refusal.reason}`,
+        );
+        return;
+      }
+    }
+
     // Tracked in `inFlight` so `stop()` waits for it. The runner's 500ms
     // timeout bounds that wait, and the alternative — a strategy call still
     // running as the process goes idle — is how an intent gets written after
@@ -1385,6 +1708,8 @@ export interface TrackerRuntimeOptions {
   rpcHttpUrl: string;
   /** `RPC_WSS_URL`. */
   rpcWssUrl: string;
+  /** Copyability scores. Defaults to `./data/wallet-scores.json`. */
+  walletScoresPath?: string;
   /** `JUPITER_API_KEY`. Absent selects the rate-limited free host. */
   jupiterApiKey?: string;
   /**
@@ -1558,7 +1883,28 @@ export function createTrackerRuntime(options: TrackerRuntimeOptions): TrackerRun
     connect: createStreamSocketFactory({ wssUrl: options.rpcWssUrl }),
   });
 
+  // Read once at composition. The fast loop must never touch the filesystem on
+  // the signal path, and a missing file is not an error — it means no wallet is
+  // scored yet, so every entry signal is refused as `WALLET_UNSCORED`. That is
+  // the correct default: a bot with no copyability evidence should not trade.
+  let walletScores: WalletScoresFile | undefined;
+  const scoresPath = options.walletScoresPath ?? './data/wallet-scores.json';
+  try {
+    walletScores = JSON.parse(readFileSync(scoresPath, 'utf8')) as WalletScoresFile;
+    logger.info(
+      { path: scoresPath, wallets: walletScores.scores.length },
+      `Loaded copyability scores for ${walletScores.scores.length} wallet(s)`,
+    );
+  } catch {
+    logger.warn(
+      { path: scoresPath },
+      'No wallet copyability scores — every entry signal will be refused as WALLET_UNSCORED. ' +
+        'Run `npx tsx scripts/score-wallets.ts`.',
+    );
+  }
+
   const tracker = new Tracker({
+    ...(walletScores === undefined ? {} : { walletScores }),
     config,
     ledger,
     runtime,
@@ -1694,6 +2040,7 @@ function createPinoLogger(): TrackerLogger {
  * than reported, because a number nobody reads is not a check.
  */
 
+import { MAX_WARM_FILL } from '../adapters/walletStream.js';
 import type { Fill, Lamports, UnixMillis } from '../core/types.js';
 import { lamportsToSol } from '../core/units.js';
 
@@ -1793,6 +2140,10 @@ const UNHANDLED_BASIS =
 /** Mirrors `MAX_DEFERRED` in `db/cursors.ts`, for the printed line only. */
 const MAX_DEFERRED_REPORTED = 4_096;
 
+const WARM_FILL_BASIS =
+  'entry-latency bound; 13 wallets x 100 x 194ms mean fetch = ~4.2 min startup (n=47,684 fetches), ' +
+  'p90 of observed fills is 100 (n=842 gap-filled events, 12 sessions to 2026-08-09)';
+
 const DEATH_DEDUPE_MS = 1_000;
 const DEATH_DEDUPE_BASIS =
   'pairs max 34ms (n=56) vs closest distinct deaths 9,946ms (n=35), 11 sessions to 2026-08-07';
@@ -1884,6 +2235,37 @@ export interface SoakSnapshot {
     /** ms between a disconnect and the reconnect that followed it. */
     reconnectLatencyMs: { count: number; p50: number; max: number };
     gapFills: number;
+    /**
+     * Windows a warm gap fill deliberately abandoned, with their slot ranges.
+     * Distinct from `truncatedGapFills`, which counts COLD truncations — those
+     * happen when the cursor was unusable, these when it was usable and the
+     * backlog was dropped on purpose.
+     */
+    /**
+     * Failed transactions classified at ingress instead of fetched. Not a
+     * finding: this is saved work, and the number is what says how much.
+     */
+    txFailedSkipped: number;
+    txFailedSkippedByWallet: Tally;
+    /**
+     * The leg of the freshness budget that was never measured. p50/p95/max, and
+     * `n` so a quiet run cannot be mistaken for a fast one.
+     */
+    queue: {
+      n: number;
+      residencyMs: { p50: number; p95: number; max: number };
+      depth: { p50: number; p95: number; max: number };
+    };
+    historySkipped: Array<{
+      wallet: string;
+      fromSlot: number;
+      toSlot: number;
+      count: number | null;
+    }>;
+    /** Sum over gaps whose count is known. See `historySkippedUncounted`. */
+    signaturesSkipped: number;
+    /** Gaps whose window is known but whose population was never enumerated. */
+    historySkippedUncounted: number;
     signaturesRecovered: number;
     truncatedGapFills: number;
     /**
@@ -1934,6 +2316,14 @@ function bump(counts: Map<string, number>, key: string, by = 1): void {
   counts.set(key, (counts.get(key) ?? 0) + by);
 }
 
+/** p50/p95/max over a sample. Empty reads zero, with `n` alongside to say so. */
+function percentiles(samples: readonly number[]): { p50: number; p95: number; max: number } {
+  if (samples.length === 0) return { p50: 0, p95: 0, max: 0 };
+  const sorted = [...samples].sort((a, b) => a - b);
+  const at = (p: number): number => sorted[Math.floor((sorted.length - 1) * p)] ?? 0;
+  return { p50: at(0.5), p95: at(0.95), max: sorted[sorted.length - 1] ?? 0 };
+}
+
 function bps(part: number, whole: number): number {
   return whole === 0 ? 0 : Math.floor((part * 10_000) / whole);
 }
@@ -1973,6 +2363,37 @@ export class SoakDigest {
   private lastDisconnectAt: UnixMillis | undefined;
   private readonly reconnectLatencies: number[] = [];
   private gapFills = 0;
+  /**
+   * Windows a warm gap fill deliberately abandoned.
+   *
+   * Accumulated HERE rather than read back through a callback at snapshot time,
+   * which is what makes it survive a final digest taken during shutdown. The
+   * `?? 0` over a torn-down `tracker.session` reported `written: 0` for a
+   * recorder that had written 71,891 lines; internal state cannot fail that way.
+   */
+  /**
+   * Failed transactions classified from `err` without a fetch.
+   *
+   * Accumulated in the digest's own state, so it survives a final snapshot taken
+   * during shutdown rather than reading zero off a torn-down source.
+   */
+  /**
+   * Live-path queue residency and depth, as samples rather than a running mean.
+   *
+   * A mean over a bursty queue describes nothing that happened: the run that
+   * motivated this shed 242,924 signatures in bursts while sitting empty in
+   * between. Percentiles are the only honest summary.
+   */
+  private readonly queueResidencyMs: number[] = [];
+  private readonly queueDepths: number[] = [];
+  private txFailedSkipped = 0;
+  private readonly txFailedSkippedByWallet = new Map<string, number>();
+  private readonly historySkipped: Array<{
+    wallet: string;
+    fromSlot: number;
+    toSlot: number;
+    count: number | null;
+  }> = [];
   private signaturesRecovered = 0;
   private truncatedGapFills = 0;
   private rateLimited = 0;
@@ -2082,6 +2503,39 @@ export class SoakDigest {
         }
         break;
       }
+      case 'stream-fetch-window': {
+        const event = data as { queuedMs?: number; queueDepth?: number };
+        // Live path only — the field is absent on gap fill, and absent is not
+        // zero. Averaging "did not queue" into "queued for no time" is how a
+        // bursty queue gets described as calm.
+        if (typeof event.queuedMs === 'number') this.queueResidencyMs.push(event.queuedMs);
+        if (typeof event.queueDepth === 'number') this.queueDepths.push(event.queueDepth);
+        break;
+      }
+      case 'stream-tx-failed-skipped': {
+        const event = data as { wallet?: string; source?: string };
+        this.txFailedSkipped += 1;
+        bump(this.txFailedSkippedByWallet, event.wallet ?? 'unknown');
+        break;
+      }
+      case 'stream-history-skipped': {
+        const event = data as {
+          wallet?: string;
+          fromSlot?: number;
+          toSlot?: number;
+          count?: number | null;
+        };
+        this.historySkipped.push({
+          wallet: event.wallet ?? 'unknown',
+          fromSlot: event.fromSlot ?? 0,
+          toSlot: event.toSlot ?? 0,
+          // `null` means paging stopped before the window was enumerated. Kept
+          // as null rather than coerced to 0: a window whose population is
+          // unknown must not be summed into a total that reads as fact.
+          count: event.count ?? null,
+        });
+        break;
+      }
       case 'stream-gap-filled': {
         const event = data as { count?: number; truncated?: boolean };
         this.gapFills += 1;
@@ -2159,6 +2613,18 @@ export class SoakDigest {
         `${[...this.unmodeled.keys()].sort().join(', ')} produced unmodeled events — the session schema is incomplete`,
       );
     }
+    // An acknowledged gap is not an error — it is the warm bound working. It is
+    // a FINDING because a run that skipped history and did not say so is a run
+    // whose cursors describe positions it never delivered, and that has to be
+    // visible in the one artifact anybody reads rather than only in the session
+    // file.
+    for (const gap of this.historySkipped) {
+      findings.push(
+        `ACKNOWLEDGED GAP: ${gap.wallet} skipped ${gap.count ?? 'an uncounted number of'} signature(s), ` +
+          `slots ${gap.fromSlot}-${gap.toSlot} — warm fill bounded at ` +
+          `${MAX_WARM_FILL}, basis: ${WARM_FILL_BASIS}`,
+      );
+    }
     for (const [mint, count] of [...this.noRoute].sort()) {
       findings.push(`NO_ROUTE while holding ${mint} (${count}x) — needs an explanation`);
     }
@@ -2218,6 +2684,16 @@ export class SoakDigest {
           max: latencies.at(-1) ?? 0,
         },
         gapFills: this.gapFills,
+        queue: {
+          n: this.queueResidencyMs.length,
+          residencyMs: percentiles(this.queueResidencyMs),
+          depth: percentiles(this.queueDepths),
+        },
+        txFailedSkipped: this.txFailedSkipped,
+        txFailedSkippedByWallet: sorted(this.txFailedSkippedByWallet),
+        historySkipped: this.historySkipped.map((gap) => ({ ...gap })),
+        signaturesSkipped: this.historySkipped.reduce((sum, gap) => sum + (gap.count ?? 0), 0),
+        historySkippedUncounted: this.historySkipped.filter((gap) => gap.count === null).length,
         signaturesRecovered: this.signaturesRecovered,
         truncatedGapFills: this.truncatedGapFills,
         barrier: this.options.barrierStats?.() ?? {
@@ -2296,6 +2772,12 @@ export function formatDigest(snapshot: SoakSnapshot): string {
         `${snapshot.stream.deathEchoesCollapsed} echoes collapsed at ${DEATH_DEDUPE_MS}ms; ${DEATH_DEDUPE_BASIS}), ` +
         `reconnect p50 ${snapshot.stream.reconnectLatencyMs.p50}ms max ${snapshot.stream.reconnectLatencyMs.max}ms, ` +
         `${snapshot.stream.gapFills} gap fills recovering ${snapshot.stream.signaturesRecovered} sigs, ` +
+        `queue n=${snapshot.stream.queue.n} residency p50 ${snapshot.stream.queue.residencyMs.p50}ms ` +
+        `p95 ${snapshot.stream.queue.residencyMs.p95}ms max ${snapshot.stream.queue.residencyMs.max}ms, ` +
+        `depth p95 ${snapshot.stream.queue.depth.p95}/${snapshot.stream.queue.depth.max}, ` +
+        `${snapshot.stream.txFailedSkipped} failed-tx fetches avoided, ` +
+        `${snapshot.stream.signaturesSkipped}+ skipped in ${snapshot.stream.historySkipped.length} acknowledged gap(s) ` +
+        `(${snapshot.stream.historySkippedUncounted} uncounted), ` +
         `barrier peak deferred ${snapshot.stream.barrier.peakDeferred}/${MAX_DEFERRED_REPORTED} ` +
         `outstanding ${snapshot.stream.barrier.peakOutstanding} held-now ${snapshot.stream.barrier.heldNow}`,
     ],
@@ -2664,6 +3146,27 @@ export interface DriverLike {
 export const EXCLUDED_TRACKER_EVENTS: ReadonlySet<string> = new Set([
   // Regenerated by replay from the inputs. Recording them would let a session
   // be replayed into agreement with itself.
+  //
+  // ── KEPT OUT, AND THE COST IS NOW MEASURED ──────────────────────────────
+  //
+  // Reconciling the 2026-08-11 run's trading path was impossible from the
+  // session file: 205 entry intents and 1 fill, none of them here, so the
+  // ledger was the only source. That is a real cost and it was paid.
+  //
+  // They stay out anyway, and NOT by inertia. `decision` earned its carve-out
+  // because the replay loader carries it and never drives it — a decision is an
+  // observation about a run, so replaying cannot manufacture agreement with it.
+  // `intent-created` and `fill` are different in kind: they are precisely what
+  // a replay RE-DERIVES from the recorded swaps, quotes and screens. Recording
+  // them would let a replay be scored against its own output, which is the one
+  // property this harness exists to have.
+  //
+  // The gap they leave is real and is closed elsewhere rather than here: every
+  // refusal now writes a `decision` line, including the upstream failures that
+  // wrote none before, so "what did the bot decide and why" is answerable from
+  // the session. "What did it end up holding" remains a ledger question, which
+  // is the right place for it — the ledger is the source of truth for state,
+  // and a second copy in the session file would be a second thing to disagree.
   'intent-created',
   'fill',
   // NOTE: 'rejection' used to be here. It is now written as a `decision` line,
