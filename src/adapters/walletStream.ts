@@ -485,8 +485,16 @@ export interface HistorySkippedEvent {
   fromSlot: number;
   /** Newest abandoned slot. The cursor now stands here. */
   toSlot: number;
-  /** Exact count of abandoned signatures. */
-  count: number;
+  /**
+   * Abandoned signatures, or **null when paging stopped before the window was
+   * fully enumerated**.
+   *
+   * Nullable rather than a lower bound wearing a plain number, because a
+   * count that silently means "at least" is the shape that gets summed into a
+   * total and reported as fact. `fromSlot`/`toSlot` bound the window exactly
+   * either way; only the population inside it is unknown.
+   */
+  count: number | null;
   /** The bound that produced this, so the event says what it was measured against. */
   bound: number;
 }
@@ -542,6 +550,8 @@ export class WalletStream extends EventEmitter {
   private running = false;
   /** One reconnect loop at a time. See `beginReconnect`. */
   private reconnecting = false;
+  /** Serializes wallet-loop passes. See `gapFillAll`. */
+  private fillChain: Promise<void> = Promise.resolve();
   /** A socket death that arrived while a reconnect was already in flight. */
   private reconnectRequested = false;
   private draining = false;
@@ -636,12 +646,42 @@ export class WalletStream extends EventEmitter {
    * moving before its hold.
    */
   private async gapFillAll(): Promise<void> {
+    // SERIALIZED. Two wallet loops must never overlap.
+    //
+    // `start()` calls this directly rather than through `reconnect()`, so the
+    // `reconnecting` flag does not guard it — and now that the socket is live
+    // during the startup fill, a death inside that fill begins a reconnect whose
+    // own pass ran concurrently with it. Measured on 2026-08-10: the second
+    // pass's `hold` threw `already held`, its `finally` released all thirteen
+    // wallets INCLUDING the first pass's, and the first pass then died on
+    // `reserve without hold`, taking the process down 37 minutes in.
+    //
+    // The strict precondition added in a64422e did its job — it detected the
+    // concurrency — but detection that crashes the run is not what it was for.
+    // Chaining removes the concurrency instead of reporting it.
+    const previous = this.fillChain;
+    this.fillChain = (async () => {
+      // A failed pass must not poison the ones queued behind it.
+      await previous.catch(() => undefined);
+      if (!this.running) return;
+      await this.runGapFillPass();
+    })();
+    return this.fillChain;
+  }
+
+  private async runGapFillPass(): Promise<void> {
     const wallets = this.deps.wallets;
+    // Only what THIS pass actually took. Releasing by wallet list meant a pass
+    // that failed to acquire still released the holder's barriers.
+    const held: Address[] = [];
     try {
       // Inside the try, not before it. A blanket `hold` cannot persist and so
       // cannot throw today — but that is a fact about `flush`'s internals, and
       // the release guarantee should not depend on reading them.
-      for (const wallet of wallets) this.deps.cursors.hold(wallet);
+      for (const wallet of wallets) {
+        this.deps.cursors.hold(wallet);
+        held.push(wallet);
+      }
       for (const wallet of wallets) await this.gapFill(wallet);
     } finally {
       // Every hold, on every exit path: normal return, a throw out of any
@@ -652,7 +692,7 @@ export class WalletStream extends EventEmitter {
       //
       // Each release is isolated: one wallet's failure must not strand the
       // twelve behind it in the loop.
-      for (const wallet of wallets) {
+      for (const wallet of held) {
         try {
           this.deps.cursors.release(wallet);
         } catch (error) {
@@ -1115,6 +1155,8 @@ export class WalletStream extends EventEmitter {
     const cursor = this.deps.cursors.get(wallet);
     const collected: SignatureEntry[] = [];
     let truncated = false;
+    /** False once paging stopped early, so the skipped count is unknowable. */
+    let countedFully = true;
     let before: Signature | undefined;
 
     try {
@@ -1137,6 +1179,21 @@ export class WalletStream extends EventEmitter {
           break;
         }
 
+        // The warm bound applies to PAGING too, and that is a correction.
+        //
+        // Bounding only the entries handled left paging unbounded, on the
+        // reasoning that ~78 page calls was a good trade for an exact skipped
+        // count. That estimate came from a 77,236-entry backlog measured on a
+        // run whose socket never connected — so it never saw what a busy wallet
+        // actually emits. Measured on 2026-08-10: one wallet produced ~3,800
+        // notifications a minute, its 38-hour backlog ran to millions of
+        // signatures, and paging it had not finished after 37 minutes. The exact
+        // count is not worth an unbounded startup.
+        if (cursor !== undefined && collected.length >= MAX_WARM_FILL) {
+          countedFully = false;
+          break;
+        }
+
         before = page[page.length - 1]?.signature;
         if (before === undefined) break;
       }
@@ -1156,9 +1213,12 @@ export class WalletStream extends EventEmitter {
     // not a safety one, and it is the only place in the system that abandons
     // history on purpose.
     let skipped: SignatureEntry[] = [];
+    /** The position the abandoned window starts from. Warm path only. */
+    let skippedFromSlot = 0;
     if (cursor !== undefined && entries.length > MAX_WARM_FILL) {
       skipped = entries.slice(0, entries.length - MAX_WARM_FILL);
       entries = entries.slice(-MAX_WARM_FILL);
+      skippedFromSlot = cursor.lastSlot;
     }
 
     // Narrow the blanket hold to exactly what is about to be replayed. Until
@@ -1168,7 +1228,6 @@ export class WalletStream extends EventEmitter {
     this.deps.cursors.reserve(wallet, entries.map((entry) => entry.slot));
 
     if (skipped.length > 0) {
-      const oldest = skipped[0]!;
       const newest = skipped[skipped.length - 1]!;
 
       // AFTER `reserve`, and that ordering is the whole safety argument.
@@ -1189,9 +1248,12 @@ export class WalletStream extends EventEmitter {
       this.deps.cursors.set(wallet, newest.signature, newest.slot, this.deps.now());
       this.emit('history-skipped', {
         wallet,
-        fromSlot: oldest.slot,
+        // The last position actually delivered — the true start of the
+        // abandoned window, not merely the oldest signature paging happened to
+        // reach before it stopped.
+        fromSlot: skippedFromSlot,
         toSlot: newest.slot,
-        count: skipped.length,
+        count: countedFully ? skipped.length : null,
         bound: MAX_WARM_FILL,
       } satisfies HistorySkippedEvent);
     }

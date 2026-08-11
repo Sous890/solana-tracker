@@ -648,3 +648,64 @@ describe('startup connects before it fills', () => {
     }
   });
 });
+
+describe('two wallet-loop passes cannot overlap', () => {
+  it('survives a socket death inside the startup fill without releasing the live pass', async () => {
+    // The 2026-08-10 soak died here, 37 minutes in.
+    //
+    // `start()` calls gapFillAll directly, so `reconnecting` does not guard it.
+    // Now that the socket is live during the startup fill, a death inside that
+    // fill began a reconnect whose own pass ran concurrently: the second pass's
+    // `hold` threw `already held`, its `finally` released ALL THIRTEEN wallets
+    // including the first pass's, and the first pass then died on `reserve
+    // without hold` and took the process with it.
+    const full = entries(4);
+    const r = rig({ history: full });
+    const errors: Error[] = [];
+    r.stream.on('error', (error: Error) => errors.push(error));
+    try {
+      r.hold('sig-1');
+      const started = r.stream.start();
+      await tick();
+
+      // Kill it mid-fill. This begins a reconnect while the startup pass is
+      // still holding every cursor.
+      r.sockets[0]!.kill();
+      await tick(20);
+
+      r.release('sig-1');
+      await started;
+      await tick(40);
+
+      // The startup pass completed rather than dying on a barrier somebody else
+      // released, and no pass reported a precondition failure.
+      expect(errors.map((error) => error.message).join(' | ')).not.toMatch(
+        /reserve without hold|already held/,
+      );
+      expectRecovered(r);
+    } finally {
+      r.close();
+    }
+  });
+
+  it('leaves no wallet held once every queued pass has drained', async () => {
+    const full = entries(4);
+    const r = rig({ history: full });
+    try {
+      r.hold('sig-1');
+      const started = r.stream.start();
+      await tick();
+      r.sockets[0]!.kill();
+      await tick(20);
+      r.release('sig-1');
+      await started;
+      await tick(60);
+
+      // A pass that released another pass's barriers, or one that leaked its
+      // own, both show up here.
+      expect(r.cursors.barrierStats().heldNow).toBe(0);
+    } finally {
+      r.close();
+    }
+  });
+});

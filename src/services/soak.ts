@@ -218,8 +218,16 @@ export interface SoakSnapshot {
      * happen when the cursor was unusable, these when it was usable and the
      * backlog was dropped on purpose.
      */
-    historySkipped: Array<{ wallet: string; fromSlot: number; toSlot: number; count: number }>;
+    historySkipped: Array<{
+      wallet: string;
+      fromSlot: number;
+      toSlot: number;
+      count: number | null;
+    }>;
+    /** Sum over gaps whose count is known. See `historySkippedUncounted`. */
     signaturesSkipped: number;
+    /** Gaps whose window is known but whose population was never enumerated. */
+    historySkippedUncounted: number;
     signaturesRecovered: number;
     truncatedGapFills: number;
     /**
@@ -321,7 +329,7 @@ export class SoakDigest {
     wallet: string;
     fromSlot: number;
     toSlot: number;
-    count: number;
+    count: number | null;
   }> = [];
   private signaturesRecovered = 0;
   private truncatedGapFills = 0;
@@ -437,13 +445,16 @@ export class SoakDigest {
           wallet?: string;
           fromSlot?: number;
           toSlot?: number;
-          count?: number;
+          count?: number | null;
         };
         this.historySkipped.push({
           wallet: event.wallet ?? 'unknown',
           fromSlot: event.fromSlot ?? 0,
           toSlot: event.toSlot ?? 0,
-          count: event.count ?? 0,
+          // `null` means paging stopped before the window was enumerated. Kept
+          // as null rather than coerced to 0: a window whose population is
+          // unknown must not be summed into a total that reads as fact.
+          count: event.count ?? null,
         });
         break;
       }
@@ -531,7 +542,7 @@ export class SoakDigest {
     // file.
     for (const gap of this.historySkipped) {
       findings.push(
-        `ACKNOWLEDGED GAP: ${gap.wallet} skipped ${gap.count} signature(s), ` +
+        `ACKNOWLEDGED GAP: ${gap.wallet} skipped ${gap.count ?? 'an uncounted number of'} signature(s), ` +
           `slots ${gap.fromSlot}-${gap.toSlot} — warm fill bounded at ` +
           `${MAX_WARM_FILL}, basis: ${WARM_FILL_BASIS}`,
       );
@@ -596,7 +607,8 @@ export class SoakDigest {
         },
         gapFills: this.gapFills,
         historySkipped: this.historySkipped.map((gap) => ({ ...gap })),
-        signaturesSkipped: this.historySkipped.reduce((sum, gap) => sum + gap.count, 0),
+        signaturesSkipped: this.historySkipped.reduce((sum, gap) => sum + (gap.count ?? 0), 0),
+        historySkippedUncounted: this.historySkipped.filter((gap) => gap.count === null).length,
         signaturesRecovered: this.signaturesRecovered,
         truncatedGapFills: this.truncatedGapFills,
         barrier: this.options.barrierStats?.() ?? {
@@ -675,7 +687,8 @@ export function formatDigest(snapshot: SoakSnapshot): string {
         `${snapshot.stream.deathEchoesCollapsed} echoes collapsed at ${DEATH_DEDUPE_MS}ms; ${DEATH_DEDUPE_BASIS}), ` +
         `reconnect p50 ${snapshot.stream.reconnectLatencyMs.p50}ms max ${snapshot.stream.reconnectLatencyMs.max}ms, ` +
         `${snapshot.stream.gapFills} gap fills recovering ${snapshot.stream.signaturesRecovered} sigs, ` +
-        `${snapshot.stream.signaturesSkipped} skipped in ${snapshot.stream.historySkipped.length} acknowledged gap(s), ` +
+        `${snapshot.stream.signaturesSkipped}+ skipped in ${snapshot.stream.historySkipped.length} acknowledged gap(s) ` +
+        `(${snapshot.stream.historySkippedUncounted} uncounted), ` +
         `barrier peak deferred ${snapshot.stream.barrier.peakDeferred}/${MAX_DEFERRED_REPORTED} ` +
         `outstanding ${snapshot.stream.barrier.peakOutstanding} held-now ${snapshot.stream.barrier.heldNow}`,
     ],

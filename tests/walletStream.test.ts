@@ -1811,9 +1811,10 @@ describe('bounded warm gap fill', () => {
         bound: MAX_WARM_FILL,
       });
 
-      // The abandoned window is the OLDEST entries above the cursor: sig-2
-      // upward. sig-N sits at slot 100+N.
-      expect(h.skipped[0]?.fromSlot).toBe(102);
+      // The window starts at the CURSOR — the last position actually
+      // delivered — not at the oldest signature paging happened to reach. With
+      // paging now bounded those differ, and the cursor is the honest edge.
+      expect(h.skipped[0]?.fromSlot).toBe(101);
       expect(h.skipped[0]?.toSlot).toBe(101 + skippedCount);
 
       // Nothing in the skipped window was emitted.
@@ -1864,6 +1865,29 @@ describe('bounded warm gap fill', () => {
     } finally {
       stream.stop();
       cursors.close();
+    }
+  });
+
+  it('reports the count as unknown when paging stopped before the window ended', async () => {
+    // Paging is bounded too now. A backlog bigger than one page means the
+    // window is known but its population never was, and `count` says so rather
+    // than reporting a lower bound as a plain number that gets summed.
+    const history = entries(2_500);
+    const h = warmHarness(history);
+    try {
+      h.cursors.set(WALLET, 'sig-1', 101);
+      await h.stream.start();
+
+      expect(h.skipped).toHaveLength(1);
+      expect(h.skipped[0]?.count).toBeNull();
+      // The window itself is still exact at both ends.
+      expect(h.skipped[0]?.fromSlot).toBe(101);
+      expect(h.skipped[0]?.toSlot).toBeGreaterThan(101);
+      // And the fill still handled only the bound, not the page.
+      expect(h.swaps).toHaveLength(MAX_WARM_FILL);
+    } finally {
+      h.stream.stop();
+      h.cursors.close();
     }
   });
 
