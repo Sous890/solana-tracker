@@ -366,6 +366,23 @@ export interface FetchWindowEvent {
    * because it must be present even when the fetch returned nothing.
    */
   slot: number;
+  /**
+   * Time between `onMessage` handing this to the queue and its fetch starting.
+   *
+   * `drain()` is strictly serial — one `await handle()` at a time at a measured
+   * ~194ms — so residency is depth x fetch time, and a full queue of 20 puts
+   * ~3.7s in front of a notification before its fetch begins. Against a 15s
+   * freshness gate that is a quarter of the budget spent before the network is
+   * touched, and until now it was the one leg nothing recorded.
+   *
+   * **Live path only.** Gap fill calls `handle` directly and waits in no queue,
+   * so this is absent rather than zero there: "did not queue" and "queued for no
+   * time" are different facts and a zero would average into the first as if it
+   * were the second.
+   */
+  queuedMs?: number;
+  /** Queue length when this was enqueued, so residency reads against pressure. */
+  queueDepth?: number;
   /** 1 means it was fetchable immediately. */
   attempts: number;
   /** From first fetch attempt to the one that returned, in ms. */
@@ -518,6 +535,27 @@ export interface GapFilledEvent {
  * used to write a `fetch-window` AND a `swap-unparsed` record, and now writes
  * one.
  */
+/**
+ * Where the time in front of a swap was spent.
+ *
+ * `FetchWindowEvent`'s own comment says it is a LOWER BOUND on copy delay and
+ * excludes quote, guard and fill time — and it also excluded the queue wait
+ * ahead of it, so the budget gate 3 judges was unmeasured at both ends. With
+ * these legs plus `blockTime` and `observedAt`, the age the gate reads splits
+ * into: time to reach this process, time queued, time fetching, and the
+ * remainder between dispatch and the intent being stamped.
+ *
+ * Carried on the `swap` emit rather than added to `TrackedSwap`, which is a core
+ * type and describes the trade, not how this process came to hear about it.
+ */
+export interface SwapDelayBreakdown {
+  fetchStartedAt: UnixMillis;
+  fetchMs: number;
+  /** Live path only — gap fill waits in no queue. See `FetchWindowEvent`. */
+  queuedMs?: number;
+  queueDepth?: number;
+}
+
 export interface TxFailedSkippedEvent {
   wallet: Address;
   signature: string;
@@ -593,7 +631,15 @@ export class WalletStream extends EventEmitter {
    * whoever happens to hold that number now".
    */
   private subscriptions = new Map<number, Address>();
-  private readonly queue: Array<{ wallet: Address; entry: SignatureEntry; source: SwapSource }> = [];
+  private readonly queue: Array<{
+    wallet: Address;
+    entry: SignatureEntry;
+    source: SwapSource;
+    /** When `onMessage` handed it over. The start of the measurable budget. */
+    enqueuedAt: UnixMillis;
+    /** Queue length at that instant, so residency can be read against pressure. */
+    depthAtEnqueue: number;
+  }> = [];
   private socket: StreamSocket | undefined;
   private running = false;
   /** One reconnect loop at a time. See `beginReconnect`. */
@@ -1034,7 +1080,13 @@ export class WalletStream extends EventEmitter {
    * a memory problem and a growing lag that never recovers.
    */
   private enqueue(wallet: Address, entry: SignatureEntry, source: SwapSource): void {
-    this.queue.push({ wallet, entry, source });
+    this.queue.push({
+      wallet,
+      entry,
+      source,
+      enqueuedAt: this.deps.now(),
+      depthAtEnqueue: this.queue.length,
+    });
     if (this.queue.length > MAX_IN_FLIGHT) {
       const dropped = this.queue.length - MAX_IN_FLIGHT;
       // `splice` returns what it removed, which is the only place the identity
@@ -1065,7 +1117,10 @@ export class WalletStream extends EventEmitter {
       while (this.queue.length > 0) {
         const next = this.queue.shift();
         if (next === undefined) break;
-        await this.handle(next.wallet, next.entry, next.source);
+        await this.handle(next.wallet, next.entry, next.source, {
+          enqueuedAt: next.enqueuedAt,
+          depthAtEnqueue: next.depthAtEnqueue,
+        });
       }
     } finally {
       this.draining = false;
@@ -1085,6 +1140,7 @@ export class WalletStream extends EventEmitter {
     wallet: Address,
     entry: SignatureEntry,
     source: SwapSource,
+    queued?: { enqueuedAt: UnixMillis; depthAtEnqueue: number },
   ): Promise<void> {
     // Both sets are keyed on the PAIR. One transaction can genuinely belong to
     // two tracked wallets — the trader and the counterparty — and a
@@ -1122,6 +1178,12 @@ export class WalletStream extends EventEmitter {
         wallet,
         signature: entry.signature,
         slot: entry.slot,
+        // Absent on the gap-fill path, which calls `handle` directly and waits
+        // in no queue. Distinguished from zero on purpose: "did not queue" and
+        // "queued for no time" are different facts.
+        ...(queued === undefined
+          ? {}
+          : { queuedMs: startedAt - queued.enqueuedAt, queueDepth: queued.depthAtEnqueue }),
         attempts,
         elapsedMs: this.deps.now() - startedAt,
         resolved: tx !== null,
@@ -1136,7 +1198,13 @@ export class WalletStream extends EventEmitter {
       // Admission now depends on what the transaction turned out to be, so it
       // happens AFTER the parse rather than before it. `inFlight` still covers
       // the whole window, so the two delivery paths cannot both process this.
-      const result = await this.dispatch(wallet, entry, tx, source);
+      const result = await this.dispatch(wallet, entry, tx, source, {
+        fetchStartedAt: startedAt,
+        fetchMs: this.deps.now() - startedAt,
+        ...(queued === undefined
+          ? {}
+          : { queuedMs: startedAt - queued.enqueuedAt, queueDepth: queued.depthAtEnqueue }),
+      });
 
       // `WALLET_NOT_IN_TX` is deliberately NOT admitted.
       //
@@ -1179,6 +1247,7 @@ export class WalletStream extends EventEmitter {
     entry: SignatureEntry,
     tx: ParsedTransactionWithMeta,
     source: SwapSource,
+    delay: SwapDelayBreakdown,
   ): Promise<ParseResult> {
 
     // Stamped here, after the fetch, so `observedAt` is when this process
@@ -1194,6 +1263,12 @@ export class WalletStream extends EventEmitter {
       this.emit('swap', result.swap, {
         solAmountPath: result.solAmountPath,
         pathDisagreement: result.pathDisagreement,
+        // The budget gate 3 judges, decomposed. `blockTime` is the chain edge
+        // and `observedAt` the moment this process had the transaction in hand,
+        // so with these two legs the age the gate reads splits into: time to
+        // reach us, time waiting in the queue, time fetching, and the remainder
+        // spent between dispatch and the intent being stamped.
+        delay,
       });
     } else {
       // Context alongside, the way `swap` already carries its parse metadata.

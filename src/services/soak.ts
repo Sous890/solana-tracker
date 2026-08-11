@@ -224,6 +224,15 @@ export interface SoakSnapshot {
      */
     txFailedSkipped: number;
     txFailedSkippedByWallet: Tally;
+    /**
+     * The leg of the freshness budget that was never measured. p50/p95/max, and
+     * `n` so a quiet run cannot be mistaken for a fast one.
+     */
+    queue: {
+      n: number;
+      residencyMs: { p50: number; p95: number; max: number };
+      depth: { p50: number; p95: number; max: number };
+    };
     historySkipped: Array<{
       wallet: string;
       fromSlot: number;
@@ -284,6 +293,14 @@ function bump(counts: Map<string, number>, key: string, by = 1): void {
   counts.set(key, (counts.get(key) ?? 0) + by);
 }
 
+/** p50/p95/max over a sample. Empty reads zero, with `n` alongside to say so. */
+function percentiles(samples: readonly number[]): { p50: number; p95: number; max: number } {
+  if (samples.length === 0) return { p50: 0, p95: 0, max: 0 };
+  const sorted = [...samples].sort((a, b) => a - b);
+  const at = (p: number): number => sorted[Math.floor((sorted.length - 1) * p)] ?? 0;
+  return { p50: at(0.5), p95: at(0.95), max: sorted[sorted.length - 1] ?? 0 };
+}
+
 function bps(part: number, whole: number): number {
   return whole === 0 ? 0 : Math.floor((part * 10_000) / whole);
 }
@@ -337,6 +354,15 @@ export class SoakDigest {
    * Accumulated in the digest's own state, so it survives a final snapshot taken
    * during shutdown rather than reading zero off a torn-down source.
    */
+  /**
+   * Live-path queue residency and depth, as samples rather than a running mean.
+   *
+   * A mean over a bursty queue describes nothing that happened: the run that
+   * motivated this shed 242,924 signatures in bursts while sitting empty in
+   * between. Percentiles are the only honest summary.
+   */
+  private readonly queueResidencyMs: number[] = [];
+  private readonly queueDepths: number[] = [];
   private txFailedSkipped = 0;
   private readonly txFailedSkippedByWallet = new Map<string, number>();
   private readonly historySkipped: Array<{
@@ -452,6 +478,15 @@ export class SoakDigest {
           this.reconnectLatencies.push(Math.max(0, at - this.lastDisconnectAt));
           this.lastDisconnectAt = undefined;
         }
+        break;
+      }
+      case 'stream-fetch-window': {
+        const event = data as { queuedMs?: number; queueDepth?: number };
+        // Live path only — the field is absent on gap fill, and absent is not
+        // zero. Averaging "did not queue" into "queued for no time" is how a
+        // bursty queue gets described as calm.
+        if (typeof event.queuedMs === 'number') this.queueResidencyMs.push(event.queuedMs);
+        if (typeof event.queueDepth === 'number') this.queueDepths.push(event.queueDepth);
         break;
       }
       case 'stream-tx-failed-skipped': {
@@ -626,6 +661,11 @@ export class SoakDigest {
           max: latencies.at(-1) ?? 0,
         },
         gapFills: this.gapFills,
+        queue: {
+          n: this.queueResidencyMs.length,
+          residencyMs: percentiles(this.queueResidencyMs),
+          depth: percentiles(this.queueDepths),
+        },
         txFailedSkipped: this.txFailedSkipped,
         txFailedSkippedByWallet: sorted(this.txFailedSkippedByWallet),
         historySkipped: this.historySkipped.map((gap) => ({ ...gap })),
@@ -709,6 +749,9 @@ export function formatDigest(snapshot: SoakSnapshot): string {
         `${snapshot.stream.deathEchoesCollapsed} echoes collapsed at ${DEATH_DEDUPE_MS}ms; ${DEATH_DEDUPE_BASIS}), ` +
         `reconnect p50 ${snapshot.stream.reconnectLatencyMs.p50}ms max ${snapshot.stream.reconnectLatencyMs.max}ms, ` +
         `${snapshot.stream.gapFills} gap fills recovering ${snapshot.stream.signaturesRecovered} sigs, ` +
+        `queue n=${snapshot.stream.queue.n} residency p50 ${snapshot.stream.queue.residencyMs.p50}ms ` +
+        `p95 ${snapshot.stream.queue.residencyMs.p95}ms max ${snapshot.stream.queue.residencyMs.max}ms, ` +
+        `depth p95 ${snapshot.stream.queue.depth.p95}/${snapshot.stream.queue.depth.max}, ` +
         `${snapshot.stream.txFailedSkipped} failed-tx fetches avoided, ` +
         `${snapshot.stream.signaturesSkipped}+ skipped in ${snapshot.stream.historySkipped.length} acknowledged gap(s) ` +
         `(${snapshot.stream.historySkippedUncounted} uncounted), ` +

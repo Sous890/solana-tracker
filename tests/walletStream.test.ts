@@ -2042,3 +2042,91 @@ describe('a transaction the notification already called failed', () => {
     }
   });
 });
+
+describe('the delay budget is measurable', () => {
+  it('stamps queue residency and depth on a live fetch, and neither on gap fill', async () => {
+    // Cursor at sig-2 so the fill replays only sig-3; sig-1 is below it and so
+    // is never gap-filled, which leaves it available to arrive live without
+    // being deduped by `seen`.
+    const history = entries(3);
+    const { rpc } = fakeRpc({ history });
+    const cursors = openCursorStore({ path: ':memory:' });
+    const socket = fakeSocket();
+    let clock = 1_700_000_000_000;
+    const stream = new WalletStream({
+      wallets: [WALLET],
+      rpc,
+      cursors,
+      connect: async () => socket.socket,
+      now: () => (clock += 10),
+      sleep: async () => undefined,
+      random: () => 0,
+    });
+    const windows: Array<{ source: string; queuedMs?: number; queueDepth?: number }> = [];
+    stream.on('fetch-window', (e: any) => windows.push(e));
+    stream.on('error', () => undefined);
+    try {
+      cursors.set(WALLET, 'sig-2', 102);
+      await stream.start();
+
+      const gapfill = windows.filter((w) => w.source === 'gapfill');
+      expect(gapfill.length).toBeGreaterThan(0);
+      // ABSENT, not zero. Gap fill waits in no queue, and averaging "did not
+      // queue" into "queued for no time" is how a bursty queue reads as calm.
+      for (const w of gapfill) {
+        expect(w.queuedMs).toBeUndefined();
+        expect(w.queueDepth).toBeUndefined();
+      }
+
+      socket.deliver('sig-1', 101);
+      for (let i = 0; i < 8; i += 1) await new Promise((r) => setImmediate(r));
+
+      const live = windows.filter((w) => w.source === 'live');
+      expect(live).toHaveLength(1);
+      expect(typeof live[0]?.queuedMs).toBe('number');
+      expect(live[0]?.queueDepth).toBe(0);
+    } finally {
+      stream.stop();
+      cursors.close();
+    }
+  });
+
+  it('reports residency growing with the depth it was queued behind', async () => {
+    // `drain()` is serial, so residency is depth x fetch time. The point of
+    // recording depth alongside is that the two can be read against each other
+    // rather than residency being attributed to the network.
+    const history = entries(6);
+    const { rpc } = fakeRpc({ history });
+    const cursors = openCursorStore({ path: ':memory:' });
+    const socket = fakeSocket();
+    let clock = 1_700_000_000_000;
+    const stream = new WalletStream({
+      wallets: [WALLET],
+      rpc,
+      cursors,
+      connect: async () => socket.socket,
+      now: () => (clock += 100),
+      sleep: async () => undefined,
+      random: () => 0,
+    });
+    const live: Array<{ queuedMs?: number; queueDepth?: number }> = [];
+    stream.on('fetch-window', (e: any) => {
+      if (e.source === 'live') live.push(e);
+    });
+    stream.on('error', () => undefined);
+    try {
+      cursors.set(WALLET, 'sig-6', 106);
+      await stream.start();
+      for (let i = 1; i <= 5; i += 1) socket.deliver(`sig-${i}`, 100 + i);
+      for (let i = 0; i < 40; i += 1) await new Promise((r) => setImmediate(r));
+
+      expect(live.length).toBeGreaterThan(1);
+      const depths = live.map((w) => w.queueDepth ?? -1);
+      // Arrivals behind a busy drain record deeper queues than the first one.
+      expect(Math.max(...depths)).toBeGreaterThan(depths[0] ?? 0);
+    } finally {
+      stream.stop();
+      cursors.close();
+    }
+  });
+});
