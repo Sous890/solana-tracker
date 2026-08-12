@@ -44,6 +44,18 @@ const POOL = '5Q544fKrFoe6tsEbD7S8EmxGTJYAKtTVhAW5Q5pge4j1';
 const TAKER = 'BQ72nSv9f3PRyRKCBnHLVrerrv37CYTHm5h3s9XSiHMY';
 const T0 = 1_700_000_000_000;
 
+/**
+ * Exit delay for tests that assert ENTRY-side behaviour only.
+ *
+ * Zero is never a correct exit delay for a mirror strategy — see the
+ * `replayRoundTrip exit delay` block. These tests were written against an
+ * undelayed exit and are preserved at 0 deliberately: they check NO_DATA /
+ * NO_FILL classification, the entry-side decay curve and the CSV shape, none of
+ * which is a claim about what a copier's exit price would have been. Naming the
+ * value stops it reading as a default.
+ */
+const EXIT_UNDELAYED = 0;
+
 const dirs: string[] = [];
 afterEach(() => {
   while (dirs.length > 0) rmSync(dirs.pop() as string, { recursive: true, force: true });
@@ -296,12 +308,91 @@ describe('lookups', () => {
 // Replay
 // ---------------------------------------------------------------------------
 
+/**
+ * The exit side of the delay, which was not applied.
+ *
+ * A mirror exit is learned about over the same chain-to-fill path that delays
+ * the entry: the tracked wallet's sell lands, the socket announces it, and only
+ * then can we quote and submit. Pricing the entry at `signalTs + delay` and the
+ * exit at the wallet's own `exitTs` hands us their exit at our entry — a trade
+ * strictly better than anything executable, on both ends of the same position.
+ *
+ * There is no correct value of 0 here, which is why `exitDelayS` has no default.
+ */
+describe('replayRoundTrip exit delay', () => {
+  /**
+   * Price rises into the wallet's exit and falls after it — the ordinary shape
+   * of a mint the wallet sold near a local top. An undelayed exit books the top.
+   */
+  const risingThenFalling = [
+    poolSwapAt(T0, 1),
+    poolSwapAt(T0 + 5_000, 1.5),
+    poolSwapAt(T0 + 10_000, 2),
+    poolSwapAt(T0 + 15_000, 1),
+  ];
+  const trip = { token: MINT, signature: 'rt', signalTs: T0, exitTs: T0 + 10_000 };
+
+  it('prices the exit at the wallet exit PLUS the exit delay', () => {
+    const row = replayRoundTrip(trip, risingThenFalling, [0], 5)[0]!;
+    expect(row.fillStatus).toBe('FILLED');
+    expect(row.entryPriceSol).toBe(1);
+    // The swap at T0+15_000, not the T0+10_000 top.
+    expect(row.exitPriceSol).toBe(1);
+    expect(row.forwardReturn).toBeCloseTo(0, 12);
+  });
+
+  it('an undelayed exit books the wallet top, which is the artefact', () => {
+    const delayed = replayRoundTrip(trip, risingThenFalling, [0], 5)[0]!;
+    const undelayed = replayRoundTrip(trip, risingThenFalling, [0], 0)[0]!;
+    expect(undelayed.exitPriceSol).toBe(2);
+    expect(undelayed.forwardReturn).toBeCloseTo(1, 12);
+    // A flat trade reported as a double. This gap is the finding.
+    expect(undelayed.forwardReturn - delayed.forwardReturn).toBeCloseTo(1, 12);
+  });
+
+  /**
+   * Separate defect, same class. `nearestTo` minimises |blockTime - exitTs| and
+   * resolves ties to the EARLIER swap, so it can price our exit at a spike that
+   * happened before the wallet sold. We cannot sell on a print we have not seen.
+   */
+  it('never prices the exit before the wallet sold, even at zero delay', () => {
+    const spikeBeforeExit = [
+      poolSwapAt(T0, 1),
+      poolSwapAt(T0 + 9_000, 5),
+      poolSwapAt(T0 + 11_000, 1),
+    ];
+    const row = replayRoundTrip(trip, spikeBeforeExit, [0], 0)[0]!;
+    expect(row.exitPriceSol).toBe(1);
+    expect(row.forwardReturn).toBeCloseTo(0, 12);
+  });
+
+  it('reports NO_EXIT_PRICE when the delayed exit falls past the path', () => {
+    const rows = replayRoundTrip(trip, risingThenFalling, [0], 600);
+    expect(rows[0]!.fillStatus).toBe('NO_EXIT_PRICE');
+    expect(rows[0]!.forwardReturn).toBeNaN();
+  });
+
+  it('a longer exit delay is no better on a falling path', () => {
+    const rows = [0, 2, 5].map(
+      (exitDelayS) => replayRoundTrip(trip, risingThenFalling, [0], exitDelayS)[0]!,
+    );
+    // 0s books the T0+10_000 top. 2s and 5s both resolve to the T0+15_000 print,
+    // the first at or after the moment we could have submitted, so they agree.
+    expect(rows.every((row) => row.fillStatus === 'FILLED')).toBe(true);
+    expect(rows[0]!.forwardReturn).toBeGreaterThan(rows[1]!.forwardReturn);
+    expect(rows[1]!.forwardReturn).toBeCloseTo(rows[2]!.forwardReturn, 12);
+    expect(rows[2]!.exitPriceSol).toBe(1);
+  });
+});
+
 describe('replayRoundTrip', () => {
   it('emits one row per delay', () => {
     const swaps = Array.from({ length: 300 }, (_, i) => poolSwapAt(T0 + i * 1_000, 1));
     const rows = replayRoundTrip(
       { token: MINT, signature: 'rt', signalTs: T0, exitTs: T0 + 200_000 },
       swaps,
+      DEFAULT_DELAYS_S,
+      EXIT_UNDELAYED,
     );
     expect(rows).toHaveLength(DEFAULT_DELAYS_S.length);
     expect(rows.map((r) => r.delayS)).toEqual([...DEFAULT_DELAYS_S]);
@@ -320,6 +411,8 @@ describe('replayRoundTrip', () => {
     const rows = replayRoundTrip(
       { token: MINT, signature: 'rt', signalTs: T0, exitTs: T0 + 60_000 },
       swaps,
+      DEFAULT_DELAYS_S,
+      EXIT_UNDELAYED,
     );
 
     expect(rows.every((row) => row.fillStatus === 'NO_DATA')).toBe(true);
@@ -339,6 +432,8 @@ describe('replayRoundTrip', () => {
     const rows = replayRoundTrip(
       { token: MINT, signature: 'rt', signalTs: T0, exitTs: T0 + 10_000 },
       swaps,
+      DEFAULT_DELAYS_S,
+      EXIT_UNDELAYED,
     );
 
     const byDelay = new Map(rows.map((row) => [row.delayS, row]));
@@ -366,6 +461,8 @@ describe('replayRoundTrip', () => {
     const rows = replayRoundTrip(
       { token: MINT, signature: 'rt', signalTs: T0, exitTs: T0 + 20_000 },
       swaps,
+      DEFAULT_DELAYS_S,
+      EXIT_UNDELAYED,
     );
 
     const byDelay = new Map(rows.map((row) => [row.delayS, row]));
@@ -380,6 +477,8 @@ describe('replayRoundTrip', () => {
     const rows = replayRoundTrip(
       { token: MINT, signature: 'rt', signalTs: T0, exitTs: T0 + 60_000 },
       swaps,
+      DEFAULT_DELAYS_S,
+      EXIT_UNDELAYED,
     );
     const zero = rows.find((row) => row.delayS === 0);
     expect(zero?.entryPriceSol).toBe(1);
@@ -433,6 +532,8 @@ describe('synthetic exponential decay', () => {
     const rows = replayRoundTrip(
       { token: MINT, signature: 'rt', signalTs: T0, exitTs: T0 + 300_000 },
       decayPool(),
+      DEFAULT_DELAYS_S,
+      EXIT_UNDELAYED,
     );
     const stats = summarise(rows);
 
@@ -457,6 +558,8 @@ describe('synthetic exponential decay', () => {
     const rows = replayRoundTrip(
       { token: MINT, signature: 'rt', signalTs: T0, exitTs: T0 + 300_000 },
       decayPool(),
+      DEFAULT_DELAYS_S,
+      EXIT_UNDELAYED,
     );
     const medians = summarise(rows).map((row) => row.medianReturn);
     for (let i = 1; i < medians.length; i += 1) {
@@ -474,6 +577,8 @@ describe('sanity checks', () => {
   const rows = replayRoundTrip(
     { token: MINT, signature: 'rt', signalTs: T0, exitTs: T0 + 60_000 },
     swaps,
+    DEFAULT_DELAYS_S,
+    EXIT_UNDELAYED,
   );
 
   it('passes delay-0 comparison when the reconstruction agrees with the wallet', () => {
@@ -501,10 +606,14 @@ describe('sanity checks', () => {
     const filling = replayRoundTrip(
       { token: MINT, signature: 'fills', signalTs: T0, exitTs: T0 + 60_000 },
       swaps,
+      DEFAULT_DELAYS_S,
+      EXIT_UNDELAYED,
     );
     const empty = replayRoundTrip(
       { token: MINT, signature: 'no-fill', signalTs: T0 + 10_000_000, exitTs: T0 + 10_060_000 },
       swaps,
+      DEFAULT_DELAYS_S,
+      EXIT_UNDELAYED,
     );
     const both = [...filling, ...empty];
 
@@ -598,6 +707,8 @@ describe('determinism', () => {
       const rows = replayRoundTrip(
         { token: MINT, signature: 'rt', signalTs: T0, exitTs: T0 + 10_000 },
         result.swaps,
+        DEFAULT_DELAYS_S,
+        EXIT_UNDELAYED,
       );
       return delaysCsv(rows);
     };

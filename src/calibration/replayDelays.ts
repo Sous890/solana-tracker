@@ -12,6 +12,22 @@
  * would measure a different strategy — one with its own edge and its own decay
  * — and the number would not answer the question asked.
  *
+ * ── BUT THE EXIT IS DELAYED, TOO ──────────────────────────────────────────
+ *
+ * The wallet's sell is the signal; it is not the price we get. We learn about it
+ * over the same chain-to-fill path that delays the entry, so `exitDelayS` shifts
+ * the exit forward exactly as `delayS` shifts the entry.
+ *
+ * Until 2026-08-11 it did not. The entry was priced at `signalTs + delay` and
+ * the exit at the wallet's own `exitTs`, which hands a copier their exit at our
+ * entry — a trade strictly better than anything executable, on both ends of the
+ * same position, and a measured edge inflated by the whole of the difference.
+ *
+ * `exitDelayS` is REQUIRED and has no default. Zero is never correct, and
+ * defaulting it to `delayS` would assert a symmetry nothing has measured: the
+ * sell is detected over the same socket path but does not compete for a route
+ * the way a buy does. Sweep it and report the spread.
+ *
  * ── NO_FILL IS A RESULT ───────────────────────────────────────────────────
  *
  * If the pool has no swap between the delayed target and the wallet's exit,
@@ -29,7 +45,7 @@
  */
 
 import type { Address } from '../core/types.js';
-import { firstAtOrAfter, nearestTo } from './poolHistory.js';
+import { firstAtOrAfter } from './poolHistory.js';
 import type { PoolSwap } from './poolHistory.js';
 
 /** Candidate delays, seconds. Dense at the short end, where decay is steepest. */
@@ -82,8 +98,13 @@ export interface DelayRow {
 export function replayRoundTrip(
   trip: RoundTripInput,
   swaps: readonly PoolSwap[],
-  delays: readonly number[] = DEFAULT_DELAYS_S,
+  delays: readonly number[],
+  exitDelayS: number,
 ): DelayRow[] {
+  if (!Number.isFinite(exitDelayS) || exitDelayS < 0) {
+    throw new RangeError(`exitDelayS must be a non-negative number, got ${exitDelayS}`);
+  }
+
   // The window a copier could have transacted in: from the signal to the
   // wallet's exit. Counted once and reported on every row, because a round trip
   // whose pool went quiet is a different kind of observation from one that was
@@ -92,7 +113,32 @@ export function replayRoundTrip(
     (swap) => swap.blockTime >= trip.signalTs && swap.blockTime <= trip.exitTs,
   );
 
-  const exit = nearestTo(swaps, trip.exitTs);
+  // ── THE EXIT IS DELAYED TOO ──────────────────────────────────────────────
+  //
+  // It used to be `nearestTo(swaps, trip.exitTs)`, hoisted out of the loop so it
+  // did not vary with `delayS` at all. Two defects in one line:
+  //
+  //  1. The entry was priced at `signalTs + delay` and the exit at the wallet's
+  //     OWN exit. That hands us their exit at our entry — strictly better than
+  //     anything executable, on both ends of the same position. A mirror exit is
+  //     learned about over the same chain-to-fill path that delays the entry:
+  //     their sell lands, the socket announces it, and only then can we quote.
+  //  2. `nearestTo` minimises |blockTime − exitTs| and resolves ties to the
+  //     EARLIER swap, so it could price our exit at a spike that happened
+  //     BEFORE the wallet sold. We cannot sell on a print we have not seen.
+  //
+  // `firstAtOrAfter` fixes both: the first swap at or after the moment we could
+  // actually have submitted. No path at or after that moment is NO_EXIT_PRICE —
+  // a real outcome (the pool went quiet while we held) and already in the enum.
+  //
+  // The exit delay is NOT the entry delay and must not default to it. The sell
+  // is detected over the same socket path but does not compete for a route the
+  // way a buy does, so the two legs differ by an amount nothing has measured.
+  // Both `delays` and `exitDelayS` are therefore REQUIRED. A default of 0 would
+  // encode a value that is never correct, and a default of `delayS` would assert
+  // a symmetry nobody has measured.
+  const exitTargetTs = trip.exitTs + exitDelayS * 1_000;
+  const exit = firstAtOrAfter(swaps, exitTargetTs);
 
   return delays.map((delayS) => {
     const base: DelayRow = {
