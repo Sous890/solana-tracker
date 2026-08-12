@@ -2029,6 +2029,17 @@ describe('a wallet we cannot copy is refused at the signal', () => {
       async (swap) => {
         seen.push(swap.side);
       };
+    // `onPriceTick` has to be stubbed too, not just `onTrackedSwap`. Without it
+    // the price-loop assertion below passed on `stats.priceTicks` alone while
+    // the call itself threw `driver.onPriceTick is not a function` into an
+    // unhandled rejection — so the half of this test about the price loop was
+    // asserting that the loop RAN, never that it reached the strategy.
+    const ticked: string[] = [];
+    (
+      driver as unknown as { onPriceTick: (p: { mint: string }) => Promise<void> }
+    ).onPriceTick = async (position) => {
+      ticked.push(position.mint);
+    };
     h.tracker.useStrategy(driver);
     await h.tracker.start();
 
@@ -2039,9 +2050,11 @@ describe('a wallet we cannot copy is refused at the signal', () => {
     expect(seen).toEqual(['sell']);
     expect(h.events.filter((e) => e.type === 'signal-refused')).toHaveLength(0);
 
-    // And the price loop, which never reads this path, still sells it.
+    // And the price loop, which never reads this path, still reaches the
+    // strategy for the position that is held.
     h.scheduler.fire(0);
     await settle();
     expect(h.tracker.stats.priceTicks).toBeGreaterThan(0);
+    expect(ticked.length).toBeGreaterThan(0);
   });
 });
