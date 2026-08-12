@@ -1,0 +1,757 @@
+{
+  "reference": "analysis/master_equation.py",
+  "generatedBy": "python3 analysis/conformance.py --write",
+  "tolerance": 1e-09,
+  "note": "Written from the Python reference. Regenerating asserts the reference changed on purpose; it is never a way to make a failing port pass. Non-finite numbers are encoded as strings.",
+  "normalInvCdf": [
+    {
+      "p": 0.5,
+      "expected": 0.0
+    },
+    {
+      "p": 0.5000000001,
+      "expected": 2.5066284820303544e-10
+    },
+    {
+      "p": 0.4999999999,
+      "expected": -2.5066284820303544e-10
+    },
+    {
+      "p": 0.5,
+      "expected": 0.0
+    },
+    {
+      "p": 0.9285714285714286,
+      "expected": 1.4652337926855223
+    },
+    {
+      "p": 0.9772727272727273,
+      "expected": 2.00042356910598
+    },
+    {
+      "p": 0.9950248756218906,
+      "expected": 2.577553463733346
+    },
+    {
+      "p": 0.9999000099990001,
+      "expected": 3.719041746340193
+    },
+    {
+      "p": 0.9,
+      "expected": 1.2815515655446008
+    },
+    {
+      "p": 0.975,
+      "expected": 1.9599639845400536
+    },
+    {
+      "p": 0.999999,
+      "expected": 4.753424308817089
+    },
+    {
+      "p": 1e-12,
+      "expected": -7.034483825301132
+    },
+    {
+      "p": 0.999999999999,
+      "expected": 7.0344869100478356
+    },
+    {
+      "p": 0.001,
+      "expected": -3.090232306167813
+    },
+    {
+      "p": 0.2,
+      "expected": -0.8416212335729142
+    },
+    {
+      "p": 0.8,
+      "expected": 0.8416212335729144
+    }
+  ],
+  "portfolioHeatCap": [
+    {
+      "name": "trimmed by open exposure",
+      "openPositionsSol": [
+        0.5,
+        0.25
+      ],
+      "equitySol": 5.0,
+      "proposedSol": 1.0,
+      "maxHeat": 0.3,
+      "assumedCorrelation": 1.0,
+      "expected": 0.75
+    },
+    {
+      "name": "proposal already inside the limit",
+      "openPositionsSol": [
+        0.1
+      ],
+      "equitySol": 5.0,
+      "proposedSol": 0.2,
+      "maxHeat": 0.3,
+      "assumedCorrelation": 1.0,
+      "expected": 0.2
+    },
+    {
+      "name": "no room left, trims to zero",
+      "openPositionsSol": [
+        1.5
+      ],
+      "equitySol": 5.0,
+      "proposedSol": 0.5,
+      "maxHeat": 0.3,
+      "assumedCorrelation": 1.0,
+      "expected": 0.0
+    },
+    {
+      "name": "correlation below one loosens the limit",
+      "openPositionsSol": [
+        0.8,
+        0.7
+      ],
+      "equitySol": 5.0,
+      "proposedSol": 1.0,
+      "maxHeat": 0.3,
+      "assumedCorrelation": 0.4,
+      "expected": 0.8999999999999999
+    },
+    {
+      "name": "nothing open",
+      "openPositionsSol": [],
+      "equitySol": 5.0,
+      "proposedSol": 2.0,
+      "maxHeat": 0.3,
+      "assumedCorrelation": 1.0,
+      "expected": 1.5
+    }
+  ],
+  "vectors": [
+    {
+      "name": "kelly-bound, no shrinkage, no deflation",
+      "edge": {
+        "wins": 60,
+        "trades": 100
+      },
+      "trade": {
+        "grossWin": 0.5,
+        "grossLoss": 0.4
+      },
+      "pool": {
+        "depthSol": 41.666666666666664,
+        "priorityFeeSol": 8e-05,
+        "exitDepthRatio": 0.7
+      },
+      "latency": {
+        "delayS": 5.479,
+        "halfLifeS": 30.0
+      },
+      "equitySol": 5.0,
+      "limits": {
+        "evThreshold": 0.005
+      },
+      "expected": {
+        "take": true,
+        "sizeSol": 0.41666666666666663,
+        "winProb": 0.6,
+        "survivingAlpha": 0.881093279024076,
+        "cost": 0.02936949714126342,
+        "netGain": 0.4111771423707746,
+        "netLoss": 0.42936949714126343,
+        "expectedValue": 0.07495848656595935,
+        "kellyFull": 0.42458109919716597,
+        "breakevenWinRate": 0.510821740231482,
+        "bindingConstraint": "pool depth cap",
+        "converged": true
+      }
+    },
+    {
+      "name": "deflation at M=43, the screened-population default",
+      "edge": {
+        "wins": 343,
+        "trades": 558,
+        "walletsScreened": 43
+      },
+      "trade": {
+        "grossWin": 0.038,
+        "grossLoss": 0.4
+      },
+      "pool": {
+        "depthSol": 41.666666666666664,
+        "priorityFeeSol": 8e-05,
+        "exitDepthRatio": 0.7
+      },
+      "latency": {
+        "delayS": 5.479,
+        "halfLifeS": 30.0
+      },
+      "equitySol": 5.0,
+      "limits": {
+        "evThreshold": 0.005
+      },
+      "expected": {
+        "take": false,
+        "sizeSol": 0.0,
+        "winProb": 0.5734820818819445,
+        "survivingAlpha": 0.881093279024076,
+        "cost": 0.02936949714126342,
+        "netGain": 0.004112047461651468,
+        "netLoss": 0.42936949714126343,
+        "expectedValue": -0.1807755984849828,
+        "kellyFull": 0.0,
+        "breakevenWinRate": 0.9905139041953488,
+        "bindingConstraint": "EV gate closed",
+        "converged": true
+      }
+    },
+    {
+      "name": "deflation at M=10000, where selectionZ is largest",
+      "edge": {
+        "wins": 343,
+        "trades": 558,
+        "walletsScreened": 10000
+      },
+      "trade": {
+        "grossWin": 1.5,
+        "grossLoss": 0.4
+      },
+      "pool": {
+        "depthSol": 41.666666666666664,
+        "priorityFeeSol": 8e-05,
+        "exitDepthRatio": 0.7
+      },
+      "latency": {
+        "delayS": 5.479,
+        "halfLifeS": 30.0
+      },
+      "equitySol": 5.0,
+      "limits": {
+        "evThreshold": 0.005
+      },
+      "expected": {
+        "take": true,
+        "sizeSol": 0.41666666666666663,
+        "winProb": 0.5380746529248963,
+        "survivingAlpha": 0.881093279024076,
+        "cost": 0.02936949714126342,
+        "netGain": 1.2922704213948506,
+        "netLoss": 0.42936949714126343,
+        "expectedValue": 0.4970013044867029,
+        "kellyFull": 0.8957213711649668,
+        "breakevenWinRate": 0.249395644535444,
+        "bindingConstraint": "pool depth cap",
+        "converged": true
+      }
+    },
+    {
+      "name": "beta-binomial shrinkage active",
+      "edge": {
+        "wins": 9,
+        "trades": 10,
+        "priorStrength": 40.0,
+        "priorMean": 0.45
+      },
+      "trade": {
+        "grossWin": 0.8,
+        "grossLoss": 0.4
+      },
+      "pool": {
+        "depthSol": 100.0,
+        "priorityFeeSol": 8e-05
+      },
+      "latency": {
+        "delayS": 1.0,
+        "halfLifeS": 30.0
+      },
+      "equitySol": 5.0,
+      "limits": {},
+      "expected": {
+        "take": true,
+        "sizeSol": 0.8431029631923798,
+        "winProb": 0.54,
+        "survivingAlpha": 0.9771599684342459,
+        "cost": 0.02191085847525422,
+        "netGain": 0.7598171162721425,
+        "netLoss": 0.4219108584752542,
+        "expectedValue": 0.21622224788834007,
+        "kellyFull": 0.6744823705539038,
+        "breakevenWinRate": 0.35702874730154444,
+        "bindingConstraint": "Kelly",
+        "converged": true
+      }
+    },
+    {
+      "name": "p~ clamps at the 0.01 floor",
+      "edge": {
+        "wins": 0,
+        "trades": 30,
+        "walletsScreened": 500
+      },
+      "trade": {
+        "grossWin": 2.0,
+        "grossLoss": 0.4
+      },
+      "pool": {
+        "depthSol": 100.0
+      },
+      "latency": {
+        "delayS": 0.0,
+        "halfLifeS": 30.0
+      },
+      "equitySol": 5.0,
+      "limits": {},
+      "expected": {
+        "take": false,
+        "sizeSol": 0.0,
+        "winProb": 0.01,
+        "survivingAlpha": 1.0,
+        "cost": 0.024801980198019803,
+        "netGain": 1.9751980198019803,
+        "netLoss": 0.42480198019801985,
+        "expectedValue": -0.4008019801980198,
+        "kellyFull": -0.4715492434848368,
+        "breakevenWinRate": 0.17700082508250825,
+        "bindingConstraint": "EV gate closed",
+        "converged": true
+      }
+    },
+    {
+      "name": "p~ clamps at the 0.99 ceiling",
+      "edge": {
+        "wins": 400,
+        "trades": 400
+      },
+      "trade": {
+        "grossWin": 2.0,
+        "grossLoss": 0.4
+      },
+      "pool": {
+        "depthSol": 100.0
+      },
+      "latency": {
+        "delayS": 0.0,
+        "halfLifeS": 30.0
+      },
+      "equitySol": 5.0,
+      "limits": {},
+      "expected": {
+        "take": true,
+        "sizeSol": 1.0,
+        "winProb": 0.99,
+        "survivingAlpha": 1.0,
+        "cost": 0.024801980198019803,
+        "netGain": 1.9751980198019803,
+        "netLoss": 0.42480198019801985,
+        "expectedValue": 1.9511980198019803,
+        "kellyFull": 2.3254348274726393,
+        "breakevenWinRate": 0.17700082508250825,
+        "bindingConstraint": "pool depth cap",
+        "converged": true
+      }
+    },
+    {
+      "name": "costs exceed the decayed gross win",
+      "edge": {
+        "wins": 60,
+        "trades": 100
+      },
+      "trade": {
+        "grossWin": 0.02,
+        "grossLoss": 0.4
+      },
+      "pool": {
+        "depthSol": 0.5,
+        "priorityFeeSol": 0.01,
+        "exitDepthRatio": 0.5
+      },
+      "latency": {
+        "delayS": 60.0,
+        "halfLifeS": 10.0
+      },
+      "equitySol": 5.0,
+      "limits": {},
+      "expected": {
+        "take": false,
+        "sizeSol": 0.0,
+        "winProb": 0.6,
+        "survivingAlpha": 0.015625,
+        "cost": 4.034508833236265,
+        "netGain": -4.034196333236265,
+        "netLoss": 4.434508833236265,
+        "expectedValue": -4.194321333236265,
+        "kellyFull": 0.0,
+        "breakevenWinRate": 1.0,
+        "bindingConstraint": "costs exceed the decayed gross win",
+        "converged": true
+      }
+    },
+    {
+      "name": "EV gate closed by a raised tau",
+      "edge": {
+        "wins": 52,
+        "trades": 100
+      },
+      "trade": {
+        "grossWin": 0.5,
+        "grossLoss": 0.4
+      },
+      "pool": {
+        "depthSol": 41.666666666666664,
+        "priorityFeeSol": 8e-05
+      },
+      "latency": {
+        "delayS": 5.479,
+        "halfLifeS": 30.0
+      },
+      "equitySol": 5.0,
+      "limits": {
+        "evThreshold": 0.9
+      },
+      "expected": {
+        "take": false,
+        "sizeSol": 0.0,
+        "winProb": 0.52,
+        "survivingAlpha": 0.881093279024076,
+        "cost": 0.013839335824312873,
+        "netGain": 0.42670730368772514,
+        "netLoss": 0.41383933582431287,
+        "expectedValue": 0.023244916721946923,
+        "kellyFull": 0.13163341520942015,
+        "breakevenWinRate": 0.4923454765871871,
+        "bindingConstraint": "EV gate closed",
+        "converged": true
+      }
+    },
+    {
+      "name": "pool depth cap binds",
+      "edge": {
+        "wins": 90,
+        "trades": 100
+      },
+      "trade": {
+        "grossWin": 1.5,
+        "grossLoss": 0.4
+      },
+      "pool": {
+        "depthSol": 10.0,
+        "priorityFeeSol": 8e-05
+      },
+      "latency": {
+        "delayS": 0.0,
+        "halfLifeS": 30.0
+      },
+      "equitySol": 500.0,
+      "limits": {},
+      "expected": {
+        "take": true,
+        "sizeSol": 0.1,
+        "winProb": 0.9,
+        "survivingAlpha": 1.0,
+        "cost": 0.026401980198019804,
+        "netGain": 1.4735980198019802,
+        "netLoss": 0.42640198019801984,
+        "expectedValue": 1.2835980198019803,
+        "kellyFull": 2.0428232700440376,
+        "breakevenWinRate": 0.22442209484106307,
+        "bindingConstraint": "pool depth cap",
+        "converged": true
+      }
+    },
+    {
+      "name": "max equity fraction binds",
+      "edge": {
+        "wins": 90,
+        "trades": 100
+      },
+      "trade": {
+        "grossWin": 1.5,
+        "grossLoss": 0.4
+      },
+      "pool": {
+        "depthSol": 100000.0,
+        "priorityFeeSol": 8e-05
+      },
+      "latency": {
+        "delayS": 0.0,
+        "halfLifeS": 30.0
+      },
+      "equitySol": 1.0,
+      "limits": {
+        "maxEquityFraction": 0.05
+      },
+      "expected": {
+        "take": true,
+        "sizeSol": 0.05,
+        "winProb": 0.9,
+        "survivingAlpha": 1.0,
+        "cost": 0.0082009999995,
+        "netGain": 1.4917990000005,
+        "netLoss": 0.40820099999950005,
+        "expectedValue": 1.3017990000005,
+        "kellyFull": 2.1377630073042138,
+        "breakevenWinRate": 0.21484263157868425,
+        "bindingConstraint": "max equity fraction",
+        "converged": true
+      }
+    },
+    {
+      "name": "infinite half-life, surviving alpha exactly 1.0",
+      "edge": {
+        "wins": 60,
+        "trades": 100
+      },
+      "trade": {
+        "grossWin": 0.5,
+        "grossLoss": 0.4
+      },
+      "pool": {
+        "depthSol": 41.666666666666664,
+        "priorityFeeSol": 8e-05
+      },
+      "latency": {
+        "delayS": 5.479,
+        "halfLifeS": 1e+300
+      },
+      "equitySol": 5.0,
+      "limits": {},
+      "expected": {
+        "take": true,
+        "sizeSol": 0.41666666666666663,
+        "winProb": 0.6,
+        "survivingAlpha": 1.0,
+        "cost": 0.025185980198019802,
+        "netGain": 0.4748140198019802,
+        "netLoss": 0.42518598019801984,
+        "expectedValue": 0.11481401980198014,
+        "kellyFull": 0.5687120793248182,
+        "breakevenWinRate": 0.4724288668866887,
+        "bindingConstraint": "pool depth cap",
+        "converged": true
+      }
+    },
+    {
+      "name": "delay far past the half-life",
+      "edge": {
+        "wins": 80,
+        "trades": 100
+      },
+      "trade": {
+        "grossWin": 3.0,
+        "grossLoss": 0.4
+      },
+      "pool": {
+        "depthSol": 41.666666666666664,
+        "priorityFeeSol": 8e-05
+      },
+      "latency": {
+        "delayS": 120.0,
+        "halfLifeS": 5.0
+      },
+      "equitySol": 5.0,
+      "limits": {},
+      "expected": {
+        "take": false,
+        "sizeSol": 0.0,
+        "winProb": 0.8,
+        "survivingAlpha": 5.960464477539063e-08,
+        "cost": 0.025185980198019802,
+        "netGain": -0.025185801384085476,
+        "netLoss": 0.42518598019801984,
+        "expectedValue": -0.10518583714687234,
+        "kellyFull": 0.0,
+        "breakevenWinRate": 1.0,
+        "bindingConstraint": "costs exceed the decayed gross win",
+        "converged": true
+      }
+    },
+    {
+      "name": "fixed fees dominate a tiny size",
+      "edge": {
+        "wins": 70,
+        "trades": 100
+      },
+      "trade": {
+        "grossWin": 1.5,
+        "grossLoss": 0.4
+      },
+      "pool": {
+        "depthSol": 41.666666666666664,
+        "priorityFeeSol": 0.05,
+        "tipSol": 0.01
+      },
+      "latency": {
+        "delayS": 1.0,
+        "halfLifeS": 30.0
+      },
+      "equitySol": 0.2,
+      "limits": {
+        "depthCap": 0.001
+      },
+      "expected": {
+        "take": false,
+        "sizeSol": 0.0,
+        "winProb": 0.7,
+        "survivingAlpha": 0.9771599684342459,
+        "cost": 3.0069181585677747,
+        "netGain": -1.5411782059164059,
+        "netLoss": 3.4069181585677746,
+        "expectedValue": -2.1009001917118164,
+        "kellyFull": 0.0,
+        "breakevenWinRate": 1.0,
+        "bindingConstraint": "costs exceed the decayed gross win",
+        "converged": true
+      }
+    },
+    {
+      "name": "single trade, n=1",
+      "edge": {
+        "wins": 1,
+        "trades": 1,
+        "walletsScreened": 43
+      },
+      "trade": {
+        "grossWin": 1.5,
+        "grossLoss": 0.4
+      },
+      "pool": {
+        "depthSol": 41.666666666666664,
+        "priorityFeeSol": 8e-05
+      },
+      "latency": {
+        "delayS": 5.479,
+        "halfLifeS": 30.0
+      },
+      "equitySol": 5.0,
+      "limits": {},
+      "expected": {
+        "take": true,
+        "sizeSol": 0.41666666666666663,
+        "winProb": 0.99,
+        "survivingAlpha": 0.881093279024076,
+        "cost": 0.025185980198019802,
+        "netGain": 1.2964539383380942,
+        "netLoss": 0.42518598019801984,
+        "expectedValue": 1.2792375391527329,
+        "kellyFull": 2.3206795112086094,
+        "breakevenWinRate": 0.24696568406682243,
+        "bindingConstraint": "pool depth cap",
+        "converged": true
+      }
+    },
+    {
+      "name": "lambda at 1.0, full Kelly",
+      "edge": {
+        "wins": 65,
+        "trades": 100
+      },
+      "trade": {
+        "grossWin": 1.2,
+        "grossLoss": 0.4
+      },
+      "pool": {
+        "depthSol": 41.666666666666664,
+        "priorityFeeSol": 8e-05
+      },
+      "latency": {
+        "delayS": 2.0,
+        "halfLifeS": 30.0
+      },
+      "equitySol": 5.0,
+      "limits": {
+        "kellyFraction": 1.0
+      },
+      "expected": {
+        "take": true,
+        "sizeSol": 0.41666666666666663,
+        "winProb": 0.65,
+        "survivingAlpha": 0.9548416039104165,
+        "cost": 0.025185980198019802,
+        "netGain": 1.1206239444944799,
+        "netLoss": 0.42518598019801984,
+        "expectedValue": 0.579590470852105,
+        "kellyFull": 1.2164167808749082,
+        "breakevenWinRate": 0.27505709040042553,
+        "bindingConstraint": "pool depth cap",
+        "converged": true
+      }
+    },
+    {
+      "name": "one iteration only, does not converge",
+      "edge": {
+        "wins": 9,
+        "trades": 10,
+        "priorStrength": 40.0,
+        "priorMean": 0.45
+      },
+      "trade": {
+        "grossWin": 0.8,
+        "grossLoss": 0.4
+      },
+      "pool": {
+        "depthSol": 100.0,
+        "priorityFeeSol": 8e-05
+      },
+      "latency": {
+        "delayS": 1.0,
+        "halfLifeS": 30.0
+      },
+      "equitySol": 5.0,
+      "limits": {
+        "maxIterations": 1
+      },
+      "expected": {
+        "take": true,
+        "sizeSol": 0.9142826171343391,
+        "winProb": 0.54,
+        "survivingAlpha": 0.9771599684342459,
+        "cost": 0.02329498506722595,
+        "netGain": 0.7584329896801708,
+        "netLoss": 0.42329498506722596,
+        "expectedValue": 0.21483812129636834,
+        "kellyFull": 0.6628521874149426,
+        "breakevenWinRate": 0.3582000207431058,
+        "bindingConstraint": "Kelly",
+        "converged": false
+      }
+    },
+    {
+      "name": "two iterations, still short of the fixed point",
+      "edge": {
+        "wins": 9,
+        "trades": 10,
+        "priorStrength": 40.0,
+        "priorMean": 0.45
+      },
+      "trade": {
+        "grossWin": 0.8,
+        "grossLoss": 0.4
+      },
+      "pool": {
+        "depthSol": 100.0,
+        "priorityFeeSol": 8e-05
+      },
+      "latency": {
+        "delayS": 1.0,
+        "halfLifeS": 30.0
+      },
+      "equitySol": 5.0,
+      "limits": {
+        "maxIterations": 2
+      },
+      "expected": {
+        "take": true,
+        "sizeSol": 0.8753865656035016,
+        "winProb": 0.54,
+        "survivingAlpha": 0.9771599684342459,
+        "cost": 0.02253857735630396,
+        "netGain": 0.7591893973910928,
+        "netLoss": 0.42253857735630396,
+        "expectedValue": 0.21559452900729037,
+        "kellyFull": 0.6691924112581311,
+        "breakevenWinRate": 0.3575599345920746,
+        "bindingConstraint": "Kelly",
+        "converged": false
+      }
+    }
+  ]
+}
