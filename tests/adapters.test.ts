@@ -7,6 +7,7 @@
  * the suite still never reaches the network — see `tests/setup.ts`.
  */
 
+import { isTransientRpcMessage } from '../src/adapters/rpcTransient.js';
 import { readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -464,5 +465,45 @@ describe('streamSocket', () => {
 
     expect(errored).toBe(1);
     expect(closed).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Transient JSON-RPC classification
+// ---------------------------------------------------------------------------
+
+/**
+ * The messages below are the ones actually observed, not invented. Helius
+ * returns them as JSON-RPC errors with HTTP **200**, so the `429 || >= 500`
+ * check every caller writes first never sees them, and treating "the node
+ * answered" as "the node succeeded" files a transient as permanent.
+ *
+ * "Service overloaded" killed a 40-pool calibration run and, separately, a
+ * 2,174-signature wallet export at its 136th fetch.
+ */
+describe('isTransientRpcMessage', () => {
+  it.each([
+    'Service overloaded',
+    'service overloaded, please try again',
+    'Too many requests for a specific RPC call',
+    'rate limit exceeded',
+    'Request timeout',
+    'Please try again later',
+    'temporarily unavailable',
+  ])('retries %s', (message) => {
+    expect(isTransientRpcMessage(message)).toBe(true);
+  });
+
+  it.each([
+    'Invalid param: WrongSize',
+    'Method not found',
+    'Transaction simulation failed: Blockhash not found',
+    'Node is behind by 1000 slots',
+  ])('does not retry %s', (message) => {
+    expect(isTransientRpcMessage(message)).toBe(false);
+  });
+
+  it('treats a missing message as permanent rather than looping', () => {
+    expect(isTransientRpcMessage(undefined)).toBe(false);
   });
 });

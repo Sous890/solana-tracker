@@ -39,6 +39,7 @@ import 'dotenv/config';
 import { parseSwap } from '../src/adapters/swapParser.js';
 import type { ParsedTransactionWithMeta } from '../src/adapters/swapParser.js';
 import type { Address, TrackedSwap } from '../src/core/types.js';
+import { isTransientRpcMessage } from '../src/adapters/rpcTransient.js';
 
 // ---------------------------------------------------------------------------
 // Tuning
@@ -102,7 +103,10 @@ async function rpc<T>(method: string, params: unknown[]): Promise<T> {
 
     const body = (await response.json()) as { result?: T; error?: { message: string } };
     if (body.error === undefined) return body.result as T;
-    if (!/[Tt]oo many requests|rate/.test(body.error.message)) {
+    // Helius signals transient failures as JSON-RPC errors with HTTP 200, so the
+    // status check above never sees them. Shared classifier — this script is the
+    // second to learn that lesson the hard way.
+    if (!isTransientRpcMessage(body.error.message)) {
       throw new Error(`${method}: ${body.error.message}`);
     }
     await sleep(1_000 * 2 ** attempt);

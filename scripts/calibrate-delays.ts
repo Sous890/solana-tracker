@@ -26,6 +26,7 @@ import { resolve } from 'node:path';
 import 'dotenv/config';
 import type { ParsedTransactionWithMeta } from '../src/adapters/swapParser.js';
 import type { Address } from '../src/core/types.js';
+import { isTransientRpcMessage } from '../src/adapters/rpcTransient.js';
 import {
   DEFAULT_CACHE_DIR,
   getPoolSwaps,
@@ -76,10 +77,10 @@ async function call<T>(method: string, params: unknown[]): Promise<T> {
     }
     const body = (await response.json()) as { result?: T; error?: { message: string } };
     if (body.error === undefined) return body.result as T;
-    // Transient, and Helius signals them as JSON-RPC errors with HTTP 200 —
-    // so the status check above never sees them. "Service overloaded" killed a
-    // 40-pool run at the seven-minute mark before this list included it.
-    if (!/too many requests|rate|overloaded|timeout|try again/i.test(body.error.message)) {
+    // Transient, and Helius signals them as JSON-RPC errors with HTTP 200 — so
+    // the status check above never sees them. "Service overloaded" killed a
+    // 40-pool run at the seven-minute mark before this was handled.
+    if (!isTransientRpcMessage(body.error.message)) {
       throw new Error(`${method}: ${body.error.message}`);
     }
     await sleep(1_000 * 2 ** attempt);
@@ -199,15 +200,6 @@ function oneTripPerMint<T extends { token: string; signalTs: number }>(items: T[
   return [...best.values()].sort((a, b) => a.signalTs - b.signalTs);
 }
 
-function median(values: number[]): number {
-  if (values.length === 0) return Number.NaN;
-  const sorted = [...values].sort((a, b) => a - b);
-  const mid = Math.floor(sorted.length / 2);
-  return sorted.length % 2 === 0
-    ? ((sorted[mid - 1] as number) + (sorted[mid] as number)) / 2
-    : (sorted[mid] as number);
-}
-
 // ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
@@ -221,7 +213,10 @@ async function main(): Promise<void> {
 
   const wallet = get('--wallet');
   if (wallet === undefined) {
-    console.error('Usage: --wallet <address> [--sample 200] [--exports exports] [--failed N]');
+    console.error(
+      'Usage: --wallet <address> --exit-delay-s <seconds> [--sample 200]\n' +
+        '       [--exports exports] [--failed N] [--recent] [--no-dedupe]',
+    );
     process.exit(2);
   }
 
@@ -230,6 +225,37 @@ async function main(): Promise<void> {
   const failedTransactions = Number(get('--failed') ?? 0);
   const cacheDir = get('--cache') ?? DEFAULT_CACHE_DIR;
   const maxFetches = Number(get('--max-fetches') ?? 1_500);
+
+  /**
+   * How late our EXIT lands, in seconds. Required, no default.
+   *
+   * The wallet's sell is the signal, not the price we get: we learn about it
+   * over the same socket path that delays the entry. Until 2026-08-11 the replay
+   * priced the entry at `signalTs + delay` and the exit at the wallet's own
+   * exit, which handed a copier their exit at our entry.
+   *
+   * There is no defensible default. Zero is never right, and mirroring the entry
+   * delay asserts a symmetry nothing has measured — a sell is detected over the
+   * same path but does not compete for a route the way a buy does. The measured
+   * floor is the detection leg alone (p50 171ms, p99 364ms, n=500, handoffs
+   * 21-22); the ceiling is the entry's own 5.479s, which is itself n=1. Sweep it.
+   */
+  const exitDelayRaw = get('--exit-delay-s');
+  if (exitDelayRaw === undefined) {
+    console.error(
+      'Missing --exit-delay-s. The exit is delayed too, and there is no correct default:\n' +
+        '  0      reproduces the pre-2026-08-11 artefact (their exit at our entry)\n' +
+        '  0.364  measured detection leg, p99 of n=500 — the floor\n' +
+        '  5.479  the entry delay, n=1 — the symmetric ceiling\n' +
+        'Pass one and report the spread.',
+    );
+    process.exit(2);
+  }
+  const exitDelayS = Number(exitDelayRaw);
+  if (!Number.isFinite(exitDelayS) || exitDelayS < 0) {
+    console.error(`--exit-delay-s must be a non-negative number, got ${exitDelayRaw}`);
+    process.exit(2);
+  }
 
   const all = readRoundTrips(resolve(exportsDir, `${wallet}.csv`));
   const ordered = [...all].sort((a, b) => a.signalTs - b.signalTs);
@@ -319,7 +345,9 @@ async function main(): Promise<void> {
       if (result.fetchCapped) cappedPools += 1;
       if (result.truncated) truncatedPools += 1;
 
-      for (const trip of trips) rows.push(...replayRoundTrip(trip, result.swaps));
+      for (const trip of trips) {
+        rows.push(...replayRoundTrip(trip, result.swaps, [...DEFAULT_DELAYS_S], exitDelayS));
+      }
     } catch (cause) {
       failedPools.push({ mint, message: (cause as Error).message });
     }
@@ -335,7 +363,7 @@ async function main(): Promise<void> {
   // Timestamped, so a run can never overwrite the one before it. The previous
   // pass destroyed a passing dataset by writing over it.
   const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
-  const outPath = resolve(exportsDir, `${wallet}.delays.${stamp}.csv`);
+  const outPath = resolve(exportsDir, `${wallet}.delays.exit${exitDelayS}s.${stamp}.csv`);
   writeFileSync(outPath, delaysCsv(rows), 'utf8');
 
   const stats = summarise(rows, DEFAULT_DELAYS_S);
