@@ -1,0 +1,412 @@
+{
+  "$comment": [
+    "THE SCREENING RECORD. This is the auditable source of `wallets_screened` (M),",
+    "the input the README calls the most consequential and the one only the operator",
+    "knows. Before 2026-08-12 M was an argument in a handoff: '13 tracked plus 30",
+    "parked' where the 30 existed nowhere. It is now a count in this file.",
+    "",
+    "APPEND ONLY. A wallet examined and rejected still counts toward M -- that is the",
+    "whole point of a selection correction. Never delete an entry to tidy the list;",
+    "deleting rejections is how M silently shrinks and every deflated win rate",
+    "silently rises.",
+    "",
+    "M is len(entries), not the count of admitted wallets."
+  ],
+  "generatedAt": "2026-08-12T21:02:30.086610Z",
+  "m": 43,
+  "counts": {
+    "tracked": 12,
+    "refused": 1,
+    "candidate": 30
+  },
+  "knownIncomplete": "Anything screened and discarded before 2026-08-06 is unrecorded and cannot be recovered. M is therefore a FLOOR, and the floor is now auditable where before it was asserted.",
+  "entries": [
+    {
+      "wallet": "2JptG7VJTuohCNrEE2iVT43UtjTNqRTVMsgNs8xeotbC",
+      "firstRecorded": "2026-08-06",
+      "status": "tracked",
+      "reason": null,
+      "uncopyableShare": 0.058365758754863814,
+      "roundTrips": 257,
+      "realisedScreen": null
+    },
+    {
+      "wallet": "2nHsHJpkXmHb43BqSjnQFMbUcU2kWEqFqoXsbe2zv2Wi",
+      "firstRecorded": "2026-08-06",
+      "status": "tracked",
+      "reason": null,
+      "uncopyableShare": 0.075,
+      "roundTrips": 280,
+      "realisedScreen": null
+    },
+    {
+      "wallet": "6ww5Lc3uqJ5Wc8s4xSQ55YyoxHZjN6j8LbQzktLW1dkJ",
+      "firstRecorded": "2026-08-06",
+      "status": "tracked",
+      "reason": null,
+      "uncopyableShare": 0.025,
+      "roundTrips": 200,
+      "realisedScreen": null
+    },
+    {
+      "wallet": "AgiGpUAF25B7NL9u8byDcptPcYWi4eFU4kjtcRtaMmdQ",
+      "firstRecorded": "2026-08-06",
+      "status": "tracked",
+      "reason": null,
+      "uncopyableShare": 0.20093457943925233,
+      "roundTrips": 428,
+      "realisedScreen": null
+    },
+    {
+      "wallet": "BCagckXeMChUKrHEd6fKFA1uiWDtcmCXMsqaheLiUPJd",
+      "firstRecorded": "2026-08-06",
+      "status": "tracked",
+      "reason": null,
+      "uncopyableShare": 0.1033210332103321,
+      "roundTrips": 271,
+      "realisedScreen": null
+    },
+    {
+      "wallet": "C86oRMyUqzsXKXEAsCUbrhJuYuMbqXxE886s9MpUFF88",
+      "firstRecorded": "2026-08-06",
+      "status": "tracked",
+      "reason": null,
+      "uncopyableShare": 0.4521276595744681,
+      "roundTrips": 564,
+      "realisedScreen": null
+    },
+    {
+      "wallet": "CT9dekyfadMYxLdfxV76ASSLo2QKXaj5cGPmvM2rcKVC",
+      "firstRecorded": "2026-08-06",
+      "status": "tracked",
+      "reason": null,
+      "uncopyableShare": 0.047524752475247525,
+      "roundTrips": 505,
+      "realisedScreen": null
+    },
+    {
+      "wallet": "CbpnbXAD9PUAwVcYjHY96qooq6eNnoLiZzif766gqLPH",
+      "firstRecorded": "2026-08-06",
+      "status": "tracked",
+      "reason": null,
+      "uncopyableShare": 0,
+      "roundTrips": 129,
+      "realisedScreen": null
+    },
+    {
+      "wallet": "Dhaee3PzMQDafsfaF3rtiKA18M5PWPfTskDcpSipHJ5r",
+      "firstRecorded": "2026-08-06",
+      "status": "tracked",
+      "reason": null,
+      "uncopyableShare": 0,
+      "roundTrips": 97,
+      "realisedScreen": null
+    },
+    {
+      "wallet": "H8sMJSCQxfKiFTCfDR3DUMLPwcRbM61LGFJ8N4dK3WjS",
+      "firstRecorded": "2026-08-06",
+      "status": "tracked",
+      "reason": null,
+      "uncopyableShare": null,
+      "roundTrips": null,
+      "realisedScreen": null
+    },
+    {
+      "wallet": "HSsJjkHrxezZ1SdhgdivhDGXbxANicWbKvKsVtrMrJvG",
+      "firstRecorded": "2026-08-06",
+      "status": "tracked",
+      "reason": null,
+      "uncopyableShare": 0.008620689655172414,
+      "roundTrips": 116,
+      "realisedScreen": null
+    },
+    {
+      "wallet": "popo3Rj6arKNttyUFpWfbkv2gG8uS13TGtmH6JPMuHz",
+      "firstRecorded": "2026-08-06",
+      "status": "refused",
+      "reason": "uncopyable: uncopyableShare 100% at the 5479ms chain-to-fill",
+      "uncopyableShare": 1,
+      "roundTrips": 465,
+      "realisedScreen": null
+    },
+    {
+      "wallet": "yVrqX84dNn9pWP3Y2gBzqkCqHLfw7zsukSqjZTDoQ2C",
+      "firstRecorded": "2026-08-06",
+      "status": "tracked",
+      "reason": null,
+      "uncopyableShare": 0.052884615384615384,
+      "roundTrips": 208,
+      "realisedScreen": null
+    },
+    {
+      "wallet": "BNnN2MqfWLvgThYBsv6v8JQaYZXYKYahC5YCy27Ct1cX",
+      "firstRecorded": "2026-08-12",
+      "status": "candidate",
+      "reason": "parked pending the realised screen; supplied by the operator 2026-08-12 after the list was found to exist nowhere in the project",
+      "uncopyableShare": null,
+      "roundTrips": null,
+      "realisedScreen": null
+    },
+    {
+      "wallet": "VJSDW6S74YXR4rRR9P4xwhMvLZJQMhrUb8XMFirUsy1",
+      "firstRecorded": "2026-08-12",
+      "status": "candidate",
+      "reason": "parked pending the realised screen; supplied by the operator 2026-08-12 after the list was found to exist nowhere in the project",
+      "uncopyableShare": null,
+      "roundTrips": null,
+      "realisedScreen": null
+    },
+    {
+      "wallet": "5B52w1ZW9tuwUduueP5J7HXz5AcGfruGoX6YoAudvyxG",
+      "firstRecorded": "2026-08-12",
+      "status": "candidate",
+      "reason": "parked pending the realised screen; supplied by the operator 2026-08-12 after the list was found to exist nowhere in the project",
+      "uncopyableShare": null,
+      "roundTrips": null,
+      "realisedScreen": null
+    },
+    {
+      "wallet": "7eNRALuXYUJkUWTvRj5tcB7tcT43kmT5SNdkfy9fKTto",
+      "firstRecorded": "2026-08-12",
+      "status": "candidate",
+      "reason": "parked pending the realised screen; supplied by the operator 2026-08-12 after the list was found to exist nowhere in the project",
+      "uncopyableShare": null,
+      "roundTrips": null,
+      "realisedScreen": null
+    },
+    {
+      "wallet": "G3gZWqrYkNmYFKYCyfRCNtGuxdyuE2wiYKkZpiZn4WSS",
+      "firstRecorded": "2026-08-12",
+      "status": "candidate",
+      "reason": "parked pending the realised screen; supplied by the operator 2026-08-12 after the list was found to exist nowhere in the project",
+      "uncopyableShare": null,
+      "roundTrips": null,
+      "realisedScreen": null
+    },
+    {
+      "wallet": "DxM1hfY8FQ8dNGrucuJzhJcF8KRbjk8WBwrgKvQ9spPv",
+      "firstRecorded": "2026-08-12",
+      "status": "candidate",
+      "reason": "parked pending the realised screen; supplied by the operator 2026-08-12 after the list was found to exist nowhere in the project",
+      "uncopyableShare": null,
+      "roundTrips": null,
+      "realisedScreen": null
+    },
+    {
+      "wallet": "8deJ9xeUvXSJwicYptA9mHsU2rN2pDx37KWzkDkEXhU6",
+      "firstRecorded": "2026-08-12",
+      "status": "candidate",
+      "reason": "parked pending the realised screen; supplied by the operator 2026-08-12 after the list was found to exist nowhere in the project",
+      "uncopyableShare": null,
+      "roundTrips": null,
+      "realisedScreen": null
+    },
+    {
+      "wallet": "87rRdssFiTJKY4MGARa4G5vQ31hmR7MxSmhzeaJ5AAxJ",
+      "firstRecorded": "2026-08-12",
+      "status": "candidate",
+      "reason": "parked pending the realised screen; supplied by the operator 2026-08-12 after the list was found to exist nowhere in the project",
+      "uncopyableShare": null,
+      "roundTrips": null,
+      "realisedScreen": null
+    },
+    {
+      "wallet": "5dd3zjBQQvQqtmWF67nR6XaRKe79cYu4fP6LFXZ1YRR9",
+      "firstRecorded": "2026-08-12",
+      "status": "candidate",
+      "reason": "parked pending the realised screen; supplied by the operator 2026-08-12 after the list was found to exist nowhere in the project",
+      "uncopyableShare": null,
+      "roundTrips": null,
+      "realisedScreen": null
+    },
+    {
+      "wallet": "HXQxdXSQ812WPkkAAtqxb6pfXGMQE7Qi4SRpypB9LvK9",
+      "firstRecorded": "2026-08-12",
+      "status": "candidate",
+      "reason": "parked pending the realised screen; supplied by the operator 2026-08-12 after the list was found to exist nowhere in the project",
+      "uncopyableShare": null,
+      "roundTrips": null,
+      "realisedScreen": null
+    },
+    {
+      "wallet": "498g1rVnFcnjBjpfw1xyqA1WvgQXUU8RWuELjxkjAayQ",
+      "firstRecorded": "2026-08-12",
+      "status": "candidate",
+      "reason": "parked pending the realised screen; supplied by the operator 2026-08-12 after the list was found to exist nowhere in the project",
+      "uncopyableShare": null,
+      "roundTrips": null,
+      "realisedScreen": null
+    },
+    {
+      "wallet": "Hw5UKBU5k3YudnGwaykj5E8cYUidNMPuEewRRar5Xoc7",
+      "firstRecorded": "2026-08-12",
+      "status": "candidate",
+      "reason": "parked pending the realised screen; supplied by the operator 2026-08-12 after the list was found to exist nowhere in the project",
+      "uncopyableShare": null,
+      "roundTrips": null,
+      "realisedScreen": null
+    },
+    {
+      "wallet": "Gqn915c6cPdmmmGz8w11DxbTixA9LzoP1GSyS3wjKs8Y",
+      "firstRecorded": "2026-08-12",
+      "status": "candidate",
+      "reason": "parked pending the realised screen; supplied by the operator 2026-08-12 after the list was found to exist nowhere in the project",
+      "uncopyableShare": null,
+      "roundTrips": null,
+      "realisedScreen": null
+    },
+    {
+      "wallet": "8MaVa9kdt3NW4Q5HyNAm1X5LbR8PQRVDc1W8NMVK88D5",
+      "firstRecorded": "2026-08-12",
+      "status": "candidate",
+      "reason": "parked pending the realised screen; supplied by the operator 2026-08-12 after the list was found to exist nowhere in the project",
+      "uncopyableShare": null,
+      "roundTrips": null,
+      "realisedScreen": null
+    },
+    {
+      "wallet": "ATFRUwvyMh61w2Ab6AZxUyxsAfiiuG1RqL6iv3Vi9q2B",
+      "firstRecorded": "2026-08-12",
+      "status": "candidate",
+      "reason": "parked pending the realised screen; supplied by the operator 2026-08-12 after the list was found to exist nowhere in the project",
+      "uncopyableShare": null,
+      "roundTrips": null,
+      "realisedScreen": null
+    },
+    {
+      "wallet": "4Be9CvxqHW6BYiRAxW9Q3xu1ycTMWaL5z8NX4HR3ha7t",
+      "firstRecorded": "2026-08-12",
+      "status": "candidate",
+      "reason": "parked pending the realised screen; supplied by the operator 2026-08-12 after the list was found to exist nowhere in the project",
+      "uncopyableShare": null,
+      "roundTrips": null,
+      "realisedScreen": null
+    },
+    {
+      "wallet": "FsG3BaPmRTdSrPaivbgJsFNCCa8cPfkUtk8VLWXkHpHP",
+      "firstRecorded": "2026-08-12",
+      "status": "candidate",
+      "reason": "parked pending the realised screen; supplied by the operator 2026-08-12 after the list was found to exist nowhere in the project",
+      "uncopyableShare": null,
+      "roundTrips": null,
+      "realisedScreen": null
+    },
+    {
+      "wallet": "DNfuF1L62WWyW3pNakVkyGGFzVVhj4Yr52jSmdTyeBHm",
+      "firstRecorded": "2026-08-12",
+      "status": "candidate",
+      "reason": "parked pending the realised screen; supplied by the operator 2026-08-12 after the list was found to exist nowhere in the project",
+      "uncopyableShare": null,
+      "roundTrips": null,
+      "realisedScreen": null
+    },
+    {
+      "wallet": "J9oehT3iADgMEHdizdna3XnHLpps1gjzEgPxVLfAJnvP",
+      "firstRecorded": "2026-08-12",
+      "status": "candidate",
+      "reason": "parked pending the realised screen; supplied by the operator 2026-08-12 after the list was found to exist nowhere in the project",
+      "uncopyableShare": null,
+      "roundTrips": null,
+      "realisedScreen": null
+    },
+    {
+      "wallet": "J6TDXvarvpBdPXTaTU8eJbtso1PUCYKGkVtMKUUY8iEa",
+      "firstRecorded": "2026-08-12",
+      "status": "candidate",
+      "reason": "parked pending the realised screen; supplied by the operator 2026-08-12 after the list was found to exist nowhere in the project",
+      "uncopyableShare": null,
+      "roundTrips": null,
+      "realisedScreen": null
+    },
+    {
+      "wallet": "DYAn4XpAkN5mhiXkRB7dGq4Jadnx6XYgu8L5b3WGhbrt",
+      "firstRecorded": "2026-08-12",
+      "status": "candidate",
+      "reason": "parked pending the realised screen; supplied by the operator 2026-08-12 after the list was found to exist nowhere in the project",
+      "uncopyableShare": null,
+      "roundTrips": null,
+      "realisedScreen": null
+    },
+    {
+      "wallet": "CAPn1yH4oSywsxGU456jfgTrSSUidf9jgeAnHceNUJdw",
+      "firstRecorded": "2026-08-12",
+      "status": "candidate",
+      "reason": "parked pending the realised screen; supplied by the operator 2026-08-12 after the list was found to exist nowhere in the project",
+      "uncopyableShare": null,
+      "roundTrips": null,
+      "realisedScreen": null
+    },
+    {
+      "wallet": "2ekKJ8AGJsseBGhq8XdcHvmpiYN7Jet1hvPckJThJJ3c",
+      "firstRecorded": "2026-08-12",
+      "status": "candidate",
+      "reason": "parked pending the realised screen; supplied by the operator 2026-08-12 after the list was found to exist nowhere in the project",
+      "uncopyableShare": null,
+      "roundTrips": null,
+      "realisedScreen": null
+    },
+    {
+      "wallet": "Be24Gbf5KisDk1LcWWZsBn8dvB816By7YzYF5zWZnRR6",
+      "firstRecorded": "2026-08-12",
+      "status": "candidate",
+      "reason": "parked pending the realised screen; supplied by the operator 2026-08-12 after the list was found to exist nowhere in the project",
+      "uncopyableShare": null,
+      "roundTrips": null,
+      "realisedScreen": null
+    },
+    {
+      "wallet": "8yJFWmVTQq69p6VJxGwpzW7ii7c5J9GRAtHCNMMQPydj",
+      "firstRecorded": "2026-08-12",
+      "status": "candidate",
+      "reason": "parked pending the realised screen; supplied by the operator 2026-08-12 after the list was found to exist nowhere in the project",
+      "uncopyableShare": null,
+      "roundTrips": null,
+      "realisedScreen": null
+    },
+    {
+      "wallet": "HetnuaUUbBjFCx5wFYoiQuTRmDFKbEwqj1z4MsEJ1jYf",
+      "firstRecorded": "2026-08-12",
+      "status": "candidate",
+      "reason": "parked pending the realised screen; supplied by the operator 2026-08-12 after the list was found to exist nowhere in the project",
+      "uncopyableShare": null,
+      "roundTrips": null,
+      "realisedScreen": null
+    },
+    {
+      "wallet": "E7gozEiAPNhpJsdS52amhhN2XCAqLZa7WPrhyR6C8o4S",
+      "firstRecorded": "2026-08-12",
+      "status": "candidate",
+      "reason": "parked pending the realised screen; supplied by the operator 2026-08-12 after the list was found to exist nowhere in the project",
+      "uncopyableShare": null,
+      "roundTrips": null,
+      "realisedScreen": null
+    },
+    {
+      "wallet": "FuAdiKEVXVvuo143qJSS5FVn5nuQZkq1cqSjSiBmwFJx",
+      "firstRecorded": "2026-08-12",
+      "status": "candidate",
+      "reason": "parked pending the realised screen; supplied by the operator 2026-08-12 after the list was found to exist nowhere in the project",
+      "uncopyableShare": null,
+      "roundTrips": null,
+      "realisedScreen": null
+    },
+    {
+      "wallet": "88rnbm8rGpp8VBkA4NdUCBY6VphYuQytiwmKyXvdJ5EK",
+      "firstRecorded": "2026-08-12",
+      "status": "candidate",
+      "reason": "parked pending the realised screen; supplied by the operator 2026-08-12 after the list was found to exist nowhere in the project",
+      "uncopyableShare": null,
+      "roundTrips": null,
+      "realisedScreen": null
+    },
+    {
+      "wallet": "8zFZHuSRuDpuAR7J6FzwyF3vKNx4CVW3DFHJerQhc7Zd",
+      "firstRecorded": "2026-08-12",
+      "status": "candidate",
+      "reason": "parked pending the realised screen; supplied by the operator 2026-08-12 after the list was found to exist nowhere in the project",
+      "uncopyableShare": null,
+      "roundTrips": null,
+      "realisedScreen": null
+    }
+  ]
+}
