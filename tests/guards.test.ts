@@ -294,6 +294,26 @@ describe('buy gates', () => {
     );
   });
 
+  /**
+   * The mirror image of the test above, and the one that breaks the moment a
+   * sized intent replaces the fixed `positionSizeSol`.
+   *
+   * The reserve is a question about THIS spend: can the balance afford this
+   * intent and still leave the exits funded. Answering it against a config
+   * constant the intent does not use refuses trades the balance can plainly
+   * afford. Under fixed sizing the two were always equal so nothing showed;
+   * under a sized intent they differ on almost every signal. The error is
+   * one-directional — it can only over-reject, never admit an unaffordable buy
+   * — which is why it was invisible rather than dangerous.
+   */
+  it('4. sizes the check on the intent when it is BELOW positionSizeSol', async () => {
+    // 0.07 balance - 0.02 intent = 0.05, comfortably above the 0.03 reserve.
+    // Against the 0.05 config constant it would be 0.02, and refused.
+    const { guard, executed } = harness({ balanceLamports: 70_000_000n });
+    await expect(guard.execute(buy({ amountLamports: 20_000_000n }))).resolves.toBeDefined();
+    expect(executed).toHaveLength(1);
+  });
+
   it('5. rejects at the concurrent position cap', async () => {
     const { guard, logged } = harness({
       config: { maxConcurrentPositions: 2 },

@@ -240,25 +240,36 @@ export function malformedIntentReason(intent: OrderIntent): string | null {
 }
 
 /**
- * Lamports the gas reserve must be computed against.
+ * Lamports the gas reserve must be computed against: what this intent spends.
  *
- * **Clamps HIGH only.** The low end is gate 0's job, and separating the two is
- * the fix for a measured defect rather than a stylistic preference.
+ * PRECONDITION: `malformedIntentReason(intent) === null`, so `amountLamports`
+ * is a positive bigint. Gate 0 establishes it before this is ever reached, and
+ * that precondition is the whole reason this can be a plain read.
  *
- * This `max` exists so an intent asking for MORE than `positionSizeSol` cannot
- * slip past the gas reserve by being sized differently from the config. It was
- * also, accidentally, the only thing looking at the low end — and
- * `max(-1n, 50_000_000n)` is `50_000_000n`, so a negative amount was silently
- * widened into a legal one, passed every remaining gate, and died in the broker
- * as a `RangeError` with the intent already marked `failed`.
+ * ── WHY THIS NO LONGER CLAMPS TO `positionSizeSol` ────────────────────────
  *
- * PRECONDITION: `malformedIntentReason(intent) === null`, so `requested` is a
- * positive bigint. Gate 0 establishes it before this is ever reached.
+ * It used to return `max(requested, config.positionSizeSol)`, so that an intent
+ * asking for MORE than the configured size could not slip past the reserve by
+ * being sized differently from the config. Using `requested` keeps that
+ * property exactly — for an oversized intent the `max` already returned
+ * `requested` — so nothing is given up on the high end.
+ *
+ * What the `max` also did, silently, was answer the reserve question against a
+ * constant the intent does not spend whenever the intent was SMALLER. Under
+ * fixed sizing the two were always equal and it never showed. Under a sized
+ * intent they differ on almost every signal, and a 0.02 SOL buy was refused for
+ * breaching a reserve that only 0.05 SOL would have breached. The error is
+ * one-directional — it can only over-reject, never admit an unaffordable buy —
+ * which is why it was invisible rather than dangerous.
+ *
+ * The low end belongs to gate 0 and is not re-litigated here. That separation
+ * is itself the fix for a measured defect: `max(-1n, 50_000_000n)` is
+ * `50_000_000n`, so a negative amount was once widened into a legal one, passed
+ * every remaining gate, and died in the broker as a `RangeError` with the
+ * intent already marked `failed`.
  */
-function spendLamports(intent: OrderIntent, config: Config): Lamports {
-  const configured = solToLamports(config.positionSizeSol);
-  const requested = intent.amountLamports ?? 0n;
-  return requested > configured ? requested : configured;
+function spendLamports(intent: OrderIntent): Lamports {
+  return intent.amountLamports ?? 0n;
 }
 
 /**
@@ -376,7 +387,7 @@ export function guarded(inner: Broker, deps: GuardDeps): Broker {
     //    the exits of positions already open. Compared in lamports: this is a
     //    decision about money, so it is made on exact integers.
     const balance = await inner.getBalanceLamports();
-    const spend = spendLamports(intent, config);
+    const spend = spendLamports(intent);
     const reserve = solToLamports(config.reservedGasSol);
     if (balance - spend < reserve) {
       reject(
