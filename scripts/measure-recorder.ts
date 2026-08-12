@@ -20,7 +20,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { EventEmitter } from 'node:events';
-import { SessionRecorder, encodeSwap } from '../src/services/recorder.js';
+import { SessionRecorder } from '../src/services/recorder.js';
 import type { TrackedSwap } from '../src/core/types.js';
 
 const EVENTS = Number(process.argv[2] ?? '10000');
@@ -39,6 +39,14 @@ function swapOf(index: number): TrackedSwap {
     blockTime: 1_700_000_000 + index,
     venue: 'pumpfun',
     feePayer: true,
+    // Added when `TrackedSwap` grew them. This fixture drifted because
+    // `scripts/` was in neither tsconfig's `include`, so nothing checked it —
+    // and `tsx` does not typecheck, so the script kept running and kept
+    // encoding `undefined` for both fields. A throughput number measured on a
+    // payload two fields short of the real one is a throughput number for a
+    // payload we do not write.
+    source: 'live',
+    observedAt: 1_700_000_000_000 + index,
   };
 }
 
