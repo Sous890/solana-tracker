@@ -14,10 +14,24 @@ simulate every fill while claiming not to. Do not create or load a keypair path.
 - `README.md` — layering, the control API, and the recorded decisions behind
   the integer money model, the orphan gate, and disk-not-chain reconciliation.
   It is current and detailed; do not re-derive it, and do not duplicate it here.
-- `docs/handoffs/` — one file per session, numbered. **`24-liveness-and-non-trades.md`
-  is the most recent.** Read the latest two before starting. They record what
-  was verified from code and the database versus what was recalled, which is the
+- `docs/handoffs/` — one file per session, numbered. They record what was
+  verified from code and the database versus what was recalled, which is the
   distinction that matters most in this repo.
+
+  **Session 27 is the most recent and is eight files, because it ran three
+  pre-registered experiments.** Read in this order:
+
+  | file | |
+  | --- | --- |
+  | `27-stop-family.md` | the result: mirror-copying retired on this evidence |
+  | `27-audits.md` | two defects that changed earlier numbers; read before quoting any of them |
+  | `27-hssjjkhr-replay.md` | the latency replay that started it |
+  | `27-loss-side.md`, `27-sizing-step0.md` | how the wallets were refused |
+  | `27-*-prereg.md` (three) | written before their runs; the predictions are scored in the result files |
+
+  Before session 27, `26-context-handoff.md` and `24-liveness-and-non-trades.md`
+  are the live ones for the socket and ingress work, which session 27 did not
+  touch.
 
 ## Commands
 
@@ -117,6 +131,15 @@ These are repeated in every session prompt. They are not style preferences.
   The wallet rejection in handoff 17 is settled and is not to be re-litigated.
 - Paper mode only. Nothing in ordinary work should need the network; if you find
   yourself hitting RPC, you have wandered off task.
+- **`c` is unmeasured, and conclusions must be labelled for it.** The 30 bps
+  figure has never been compared to a fill. Every margin in this project is
+  computed at an *assumed* `c`, and the swept range 0 to 1.11% spans verdicts.
+  **Any conclusion whose sign changes inside that range is provisional and must
+  be labelled where it is stated**, not in a footnote. See "The cost term" below
+  for which current conclusions that covers. This replaces asking for the
+  `db/ledger.ts` sign-off in every handoff — it was requested five times across
+  six handoffs and never moved, so it is a standing condition now, not an open
+  action.
 
 ## Known gaps
 
@@ -395,6 +418,107 @@ observed swap: a 0.002 SOL transfer and a 5 SOL buy produced the same entry.
   ledger**, so it fired on every healthy run against a non-empty file. The digest
   now latches the opening flow and compares delta to delta.
 
+## Settled findings — do not re-derive
+
+Results that cost a session each and that a later strategy shape will otherwise
+rediscover the hard way. Unlike "Known gaps" these are not defects; they are
+measurements that closed a question.
+
+### A stop placed where the drawdown distribution suggests makes things WORSE
+
+Measured on `HSsJjkHr`, 33 out-of-sample paths, levels chosen from the training
+half only, scored at M_eff 516 with c = 1.11%:
+
+| | margin |
+| --- | ---: |
+| mirror, no stop at all | **−23.4pp** |
+| fixed stop 10% | −44.1pp |
+| fixed stop 25% | −41.9pp |
+| trailing 25% | −45.4pp |
+| trailing 40% | −45.6pp |
+
+**Every stop at a level the training drawdown distribution suggested was 18–22pp
+worse than not stopping.** `fixed stop 25%` moved `l_trim` from 12.5% *up* to
+15.8% — it made the losses bigger.
+
+**The mechanism, which generalises past mirror-copying and past this wallet:**
+the loss side of a memecoin path is not a bleed to be cut. It is noise around a
+drift. A stop placed where the data suggests fires at the bottom of the noise and
+forgoes the recovery, converting a recoverable dip into a realised loss at the
+worst available price.
+
+Only levels so tight they fire on two thirds of paths (5%, firing 21–23 of 33)
+came near the mirror, and they got there by trading the position away rather than
+by improving it.
+
+**The next strategy shape will want a stop. Measure before adding one.** A stop
+is an intervention with its own sign, not a safety feature that can only help.
+See `docs/handoffs/27-stop-family.md`.
+
+### The failure is structural, not small-sample — the fitting penalty was 1.0pp
+
+Twelve rules, two families, levels fitted on the earlier half of 66 paths and
+scored on the later half:
+
+| | |
+| --- | --- |
+| best in-sample rule | `stop 5% OR TP+50%`, −21.2pp |
+| the same rule out-of-sample | −22.2pp |
+| **fitting penalty** | **1.0pp** |
+
+A fitting penalty appears when a rule has been tuned to noise it cannot
+reproduce. **There was nothing to overfit to.** The in-sample best is not a
+fitted peak; it is the least-bad member of a uniformly failing set, and it stays
+least-bad out-of-sample.
+
+This is the load-bearing sentence of the retirement, and it is worth keeping the
+distinction sharp:
+
+> "We tested twelve rules and they all failed" and "we tested twelve rules, found
+> no fitting penalty, and therefore more data would not help" are different
+> claims. **Only the second closes the question.**
+
+Without it, the obvious next move is to gather more paths. With it, more paths
+are predicted not to change the answer.
+
+Note also that the out-of-sample half was the **more favourable** regime — mirror
+−15.7pp against −35.1pp in-sample — so the split ran against the verdict, not
+for it.
+
+### Mirror-copying is retired as an architecture, on this evidence
+
+Take-profits and stops both tested, pre-registered, split out-of-sample, both
+short. 137pp of variance sits inside the mirror window and a causal exit rule
+reaches essentially none of it. **The loss side is not reachable by a causal rule
+on this wallet.**
+
+Rests on: one wallet, chosen as the most favourable of twelve; n = 33
+out-of-sample; 36% pool coverage; a replay basis measured ~5pp optimistic; and an
+unmeasured `c`. The margins are negative at c = 0 throughout, so `c` is not what
+decides it.
+
+### The cost term, and which conclusions it makes provisional
+
+Per the hard constraint above. Swept range c ∈ [0, 1.11%].
+
+**Sign-stable — NOT provisional:**
+
+- `HSsJjkHr` does not clear (−22.4pp at c = 0, M = 43).
+- All twelve exit rules fail; every one is negative at c = 0.
+- Stops are worse than no stop — a relative comparison in which `c` cancels.
+- The retirement above.
+
+**Sign changes inside the range — PROVISIONAL, label at the point of use:**
+
+- **Which wallets clear on their own outcomes** (`27-loss-side.md`). At c = 0
+  four clear — `popo3Rj6`, `6ww5Lc3u`, `Dhaee3Pz`, `HSsJjkHr`. At c = 1.11% two
+  do. `popo3Rj6` and `Dhaee3Pz` flip inside the range.
+- Consequently **"eight of twelve fail at zero cost" is a c = 0 statement**, not
+  a general one.
+- **The perfect-foresight ceiling at full search deflation**: +6.6pp at c = 0
+  against +0.1pp at c = 1.11%. The sign holds but the reading "essentially zero
+  headroom" is entirely a `c` statement.
+
 ## Environment traps
 
 - **`data/` is the application's database directory, not scratch space.**
@@ -492,3 +616,22 @@ message describes the **mechanism, not the symptom**. Write the handoff in the
 style of 17 and 18: what was verified from the code and the database rather than
 recalled, what remains unknown, and what the next session should do first.
 Update the "most recent" pointer at the top of this file when you add one.
+
+### Pre-registrations record a direction of prior miss
+
+Session 27 made four scored predictions — P2, P5, P6, P8 — and **all four missed
+in the optimistic direction.** P6 by ~14pp, P3 of the replay prereg by ~28pp.
+Four from four is not variance.
+
+Noticing that is worth little. Instrumenting it is worth a lot, so the template
+now requires:
+
+1. **Every prediction records the direction of the last comparable miss.**
+2. **Every pre-registration states explicitly whether it has been shaded down,
+   and by how much.** "Not shaded" is an acceptable answer and must be written,
+   not left implicit.
+3. **The next handoff scores whether the miss rate dropped**, and reports the
+   running tally of optimistic against pessimistic misses.
+
+A prediction shaded down that still misses optimistically is a stronger finding
+than an unshaded one — it says the bias is larger than the correction.
