@@ -3,6 +3,14 @@
 Written before `scratch/exit-rules.ts` existed. No new RPC: the full post-entry
 price path for every replayable trip is already in `cache/pools`.
 
+
+> **AUDIT CORRECTION — see `27-audits.md`.** The "The question" table below
+> quotes rungs at entry delay 0, which the audit found were priced at the
+> wallet's own fill. "The entry delay costs 31.9pp of win rate" is mostly that
+> artefact; the corrected entry cost from 0 s to 5 s is ~4.3pp of margin. The
+> rules, the rule count, the deflation band and every prediction are unaffected —
+> all of them enter at 5.479 s, past `signalTs`.
+
 ## The question
 
 The mirror exit is one rule among many, and it is the one measured at −27.4pp.

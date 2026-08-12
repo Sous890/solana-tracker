@@ -385,6 +385,60 @@ describe('replayRoundTrip exit delay', () => {
   });
 });
 
+/**
+ * The entry may not be priced at the tracked wallet's own fill, nor at any
+ * print that preceded it.
+ *
+ * `firstAtOrAfter(swaps, signalTs + delay)` has no notion of whose swap it is.
+ * At delay 0, `targetTs === signalTs`, and the wallet's own buy sits at exactly
+ * that blockTime — so the entry was priced at their fill, which no copier can
+ * reach. Measured on HSsJjkHr: the wallet's entry signature was in the pool path
+ * for 64 of 67 trips, all at exactly `signalTs`.
+ *
+ * `blockTime` is second-resolution, so it is worse than that: several prints
+ * share the signal's second and `orderPoolSwaps` returns whichever sorts first.
+ * That is routinely a trade AHEAD of the wallet's own, which is why the replay's
+ * delay-0 entry came out CHEAPER than the wallet's own fill in 8 of 10 trips
+ * where both could be matched by signature (median -3.1%).
+ *
+ * Same shape as the degenerate perfect-foresight ceiling, at the other end of
+ * the trade: a bound that could act on information it would not have had.
+ */
+describe('replayRoundTrip entry exclusion', () => {
+  const trip = { token: MINT, signature: 'wallet-buy', signalTs: T0, exitTs: T0 + 20_000 };
+
+  /** Three prints in the signal's second: one before the wallet's, then theirs. */
+  const sameSecond = [
+    poolSwapAt(T0, 1.0, { signature: 'someone-else-first' }),
+    poolSwapAt(T0, 1.5, { signature: 'wallet-buy' }),
+    poolSwapAt(T0, 2.0, { signature: 'someone-else-after' }),
+    poolSwapAt(T0 + 20_000, 3.0, { signature: 'exit-print' }),
+  ];
+
+  it('does not price the entry at the wallet own fill', () => {
+    const row = replayRoundTrip(trip, sameSecond, [0], EXIT_UNDELAYED)[0]!;
+    expect(row.entryPriceSol).not.toBe(1.5);
+  });
+
+  it('does not price the entry ahead of the wallet own fill', () => {
+    const row = replayRoundTrip(trip, sameSecond, [0], EXIT_UNDELAYED)[0]!;
+    // 1.0 precedes the signal in path order. A copier cannot act on a signal
+    // that has not happened yet.
+    expect(row.entryPriceSol).not.toBe(1.0);
+    expect(row.entryPriceSol).toBe(2.0);
+  });
+
+  it('still honours the delay when the wallet print is absent from the path', () => {
+    const withoutWallet = [
+      poolSwapAt(T0, 1.0, { signature: 'a' }),
+      poolSwapAt(T0 + 5_000, 2.0, { signature: 'b' }),
+      poolSwapAt(T0 + 20_000, 3.0, { signature: 'exit-print' }),
+    ];
+    const row = replayRoundTrip(trip, withoutWallet, [5], EXIT_UNDELAYED)[0]!;
+    expect(row.entryPriceSol).toBe(2.0);
+  });
+});
+
 describe('replayRoundTrip', () => {
   it('emits one row per delay', () => {
     const swaps = Array.from({ length: 300 }, (_, i) => poolSwapAt(T0 + i * 1_000, 1));

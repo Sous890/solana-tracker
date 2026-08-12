@@ -1,5 +1,20 @@
 # 27 — HSsJjkHr latency replay: does not clear
 
+> **AUDIT CORRECTION — see `27-audits.md`.**
+>
+> The entry selector did not exclude the tracked wallet's own swap, and its
+> entry signature was in the pool path for 64 of 67 trips, all at exactly
+> `signalTs`. The **delay-0 rung is therefore priced at their fill or at a print
+> ahead of it** and is not achievable.
+>
+> §3's "even at entry delay 0 the margin is −3.8pp at M=43" understates it.
+> Corrected, entry delay 0 is **≈ −23.0pp at c=1.11%** — the same as delay 1 s,
+> as it must be at second resolution. The conclusion strengthens.
+>
+> Every figure at entry delay 5 s and 15 s is **unaffected**: those targets are
+> past `signalTs`, so the wallet's own print was never a candidate. The verdict,
+> the −27.4pp margin and all five scored conditions stand.
+
 Scored against `27-hssjjkhr-replay-prereg.md`, written before any RPC call.
 
 **Verdict: DOES NOT CLEAR.** Pre-registered non-clearing condition 1 fires by

@@ -140,6 +140,32 @@ export function replayRoundTrip(
   const exitTargetTs = trip.exitTs + exitDelayS * 1_000;
   const exit = firstAtOrAfter(swaps, exitTargetTs);
 
+  // ── THE ENTRY MAY NOT BE THE WALLET'S OWN FILL, NOR ANYTHING BEFORE IT ────
+  //
+  // `firstAtOrAfter` has no notion of whose swap it is. `blockTime` is
+  // second-resolution and the tracked wallet's own buy sits at exactly
+  // `signalTs`, so at delay 0 the entry was priced at THEIR fill — measured on
+  // HSsJjkHr, the entry signature was in the pool path for 64 of 67 trips, all
+  // at exactly `signalTs`.
+  //
+  // Worse, several prints share that second and `orderPoolSwaps` returns
+  // whichever sorts first, which is routinely a trade AHEAD of the wallet's.
+  // The replay's delay-0 entry came out CHEAPER than the wallet's own fill in
+  // 8 of the 10 trips where both could be matched by signature, median -3.1%.
+  // A copier cannot act on a signal that has not happened yet.
+  //
+  // Same defect as the perfect-foresight ceiling that could sell at its own
+  // entry print, at the other end of the trade: acting on information that was
+  // not available. Entry candidates therefore start strictly AFTER the wallet's
+  // own transaction in path order.
+  //
+  // When the wallet's print is absent from the path — 3 of 67, a pool the
+  // signature walk did not reach — there is nothing to slice from and the delay
+  // alone governs. That is the pre-existing behaviour and it is not tightened
+  // here, because the alternative is discarding a trip over a coverage gap.
+  const ownIndex = swaps.findIndex((swap) => swap.signature === trip.signature);
+  const afterOwn = ownIndex === -1 ? swaps : swaps.slice(ownIndex + 1);
+
   return delays.map((delayS) => {
     const base: DelayRow = {
       token: trip.token,
@@ -160,7 +186,7 @@ export function replayRoundTrip(
     if (swaps.length === 0 || inWindow.length === 0) return { ...base, fillStatus: 'NO_DATA' };
 
     const targetTs = trip.signalTs + delayS * 1_000;
-    const entry = firstAtOrAfter(swaps, targetTs);
+    const entry = firstAtOrAfter(afterOwn, targetTs);
 
     // The path exists and simply had nothing at or after the delayed target
     // before the wallet sold. A copier arriving that late could not have bought.
