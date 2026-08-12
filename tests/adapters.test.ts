@@ -7,7 +7,7 @@
  * the suite still never reaches the network — see `tests/setup.ts`.
  */
 
-import { isTransientRpcMessage } from '../src/adapters/rpcTransient.js';
+import { isTransientRpcMessage, isTransportError } from '../src/adapters/rpcTransient.js';
 import { readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -505,5 +505,43 @@ describe('isTransientRpcMessage', () => {
 
   it('treats a missing message as permanent rather than looping', () => {
     expect(isTransientRpcMessage(undefined)).toBe(false);
+  });
+});
+
+/**
+ * The third failure class. `fetch` throwing is not an HTTP status and not a
+ * JSON-RPC error, so neither of the other two checks sees it. It killed a
+ * thirty-wallet campaign at its second wallet.
+ */
+describe('isTransportError', () => {
+  it('retries a fetch that threw with a system error code', () => {
+    const cause = new TypeError('fetch failed');
+    (cause as unknown as { cause: unknown }).cause = { code: 'ETIMEDOUT' };
+    expect(isTransportError(cause)).toBe(true);
+  });
+
+  it.each(['fetch failed', 'socket hang up', 'network error', 'terminated'])(
+    'retries %s',
+    (message) => {
+      expect(isTransportError(new Error(message))).toBe(true);
+    },
+  );
+
+  it('retries an aborted request', () => {
+    const aborted = new Error('The operation was aborted');
+    aborted.name = 'AbortError';
+    expect(isTransportError(aborted)).toBe(true);
+  });
+
+  it.each(['Invalid param: WrongSize', 'Method not found'])(
+    'does not retry %s, which is the node answering',
+    (message) => {
+      expect(isTransportError(new Error(message))).toBe(false);
+    },
+  );
+
+  it('does not treat a non-Error as transport', () => {
+    expect(isTransportError('ETIMEDOUT')).toBe(false);
+    expect(isTransportError(undefined)).toBe(false);
   });
 });

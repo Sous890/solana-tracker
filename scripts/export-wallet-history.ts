@@ -39,7 +39,7 @@ import 'dotenv/config';
 import { parseSwap } from '../src/adapters/swapParser.js';
 import type { ParsedTransactionWithMeta } from '../src/adapters/swapParser.js';
 import type { Address, TrackedSwap } from '../src/core/types.js';
-import { isTransientRpcMessage } from '../src/adapters/rpcTransient.js';
+import { postJsonRpc } from '../src/adapters/rpcTransient.js';
 
 // ---------------------------------------------------------------------------
 // Tuning
@@ -74,8 +74,6 @@ interface SignatureEntry {
   blockTime?: number | null;
 }
 
-const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
-
 function rpcUrl(): string {
   const url = process.env['RPC_HTTP_URL'];
   if (url === undefined || url.trim().length === 0) {
@@ -88,30 +86,11 @@ function rpcUrl(): string {
 let rpcCalls = 0;
 
 async function rpc<T>(method: string, params: unknown[]): Promise<T> {
-  for (let attempt = 0; attempt < 6; attempt += 1) {
-    rpcCalls += 1;
-    const response = await fetch(rpcUrl(), {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }),
-    });
-
-    if (response.status === 429 || response.status >= 500) {
-      await sleep(500 * 2 ** attempt);
-      continue;
-    }
-
-    const body = (await response.json()) as { result?: T; error?: { message: string } };
-    if (body.error === undefined) return body.result as T;
-    // Helius signals transient failures as JSON-RPC errors with HTTP 200, so the
-    // status check above never sees them. Shared classifier — this script is the
-    // second to learn that lesson the hard way.
-    if (!isTransientRpcMessage(body.error.message)) {
-      throw new Error(`${method}: ${body.error.message}`);
-    }
-    await sleep(1_000 * 2 ** attempt);
-  }
-  throw new Error(`${method}: gave up after 6 attempts`);
+  return postJsonRpc<T>(rpcUrl(), method, params, {
+    onAttempt: () => {
+      rpcCalls += 1;
+    },
+  });
 }
 
 /** Page backwards from the tip until the cutoff or the signature cap. */
@@ -398,85 +377,108 @@ async function main(): Promise<void> {
       `(cutoff ${new Date(cutoff * 1_000).toISOString()}), cap ${args.maxSignatures} signatures each.\n`,
   );
 
+  /**
+   * One wallet's failure must not end the campaign.
+   *
+   * A `fetch failed / ETIMEDOUT` on the SECOND of thirty wallets killed the
+   * whole run on 2026-08-12 and discarded 28 wallets of remaining work. The
+   * per-call retry now covers that class, but a wallet can still fail for
+   * reasons retrying cannot fix — and when it does, the other twenty-nine are
+   * still worth having.
+   */
+  const failedWallets: { wallet: string; message: string }[] = [];
+
   for (const wallet of args.wallets) {
     const startedAt = Date.now();
     console.error(`── ${wallet}`);
+    try {
 
-    const { entries, reachedCutoff } = await walkSignatures(wallet, cutoff, args.maxSignatures);
-    process.stderr.write('\r');
-    console.error(`  signatures walked      ${entries.length}${reachedCutoff ? '' : ' (HIT CAP)'}`);
+      const { entries, reachedCutoff } = await walkSignatures(wallet, cutoff, args.maxSignatures);
+      process.stderr.write('\r');
+      console.error(`  signatures walked      ${entries.length}${reachedCutoff ? '' : ' (HIT CAP)'}`);
 
-    const swaps: TrackedSwap[] = [];
-    const failures = new Map<string, number>();
-    const failureRows: FailureRow[] = [];
-    let missing = 0;
+      const swaps: TrackedSwap[] = [];
+      const failures = new Map<string, number>();
+      const failureRows: FailureRow[] = [];
+      let missing = 0;
 
-    for (let i = 0; i < entries.length; i += FETCH_CONCURRENCY) {
-      const batch = entries.slice(i, i + FETCH_CONCURRENCY);
-      const fetched = await Promise.all(
-        batch.map(async (entry) => {
-          const tx = await rpc<ParsedTransactionWithMeta | null>('getTransaction', [
-            entry.signature,
-            { maxSupportedTransactionVersion: 0, encoding: 'jsonParsed' },
-          ]);
-          return tx;
-        }),
-      );
+      for (let i = 0; i < entries.length; i += FETCH_CONCURRENCY) {
+        const batch = entries.slice(i, i + FETCH_CONCURRENCY);
+        const fetched = await Promise.all(
+          batch.map(async (entry) => {
+            const tx = await rpc<ParsedTransactionWithMeta | null>('getTransaction', [
+              entry.signature,
+              { maxSupportedTransactionVersion: 0, encoding: 'jsonParsed' },
+            ]);
+            return tx;
+          }),
+        );
 
-      for (const tx of fetched) {
-        if (tx === null) {
-          missing += 1;
-          continue;
+        for (const tx of fetched) {
+          if (tx === null) {
+            missing += 1;
+            continue;
+          }
+          // The tracker's parser, not a second one. A separate implementation
+          // here would mean the export describes trades the bot would not see.
+          const result = parseSwap(tx, wallet, { source: 'gapfill', observedAt: Date.now() });
+          if (result.kind === 'swap') {
+            swaps.push(result.swap);
+          } else {
+            failures.set(result.reason, (failures.get(result.reason) ?? 0) + 1);
+            failureRows.push({
+              signature: result.signature,
+              slot: tx.slot,
+              blockTime: tx.blockTime ?? null,
+              reason: result.reason,
+              intendedMint: intendedMintOf(tx),
+            });
+          }
         }
-        // The tracker's parser, not a second one. A separate implementation
-        // here would mean the export describes trades the bot would not see.
-        const result = parseSwap(tx, wallet, { source: 'gapfill', observedAt: Date.now() });
-        if (result.kind === 'swap') {
-          swaps.push(result.swap);
-        } else {
-          failures.set(result.reason, (failures.get(result.reason) ?? 0) + 1);
-          failureRows.push({
-            signature: result.signature,
-            slot: tx.slot,
-            blockTime: tx.blockTime ?? null,
-            reason: result.reason,
-            intendedMint: intendedMintOf(tx),
-          });
-        }
+
+        process.stderr.write(
+          `\r  fetching…              ${Math.min(i + FETCH_CONCURRENCY, entries.length)}/${entries.length}`,
+        );
       }
+      process.stderr.write('\r');
 
-      process.stderr.write(
-        `\r  fetching…              ${Math.min(i + FETCH_CONCURRENCY, entries.length)}/${entries.length}`,
-      );
+      const { trips, open } = pairFifo(swaps);
+      const kept = trips.filter((t) => t.solIn >= DUST_SOL && !Number.isNaN(t.exitTs));
+      const dust = trips.length - kept.length;
+
+      const rows = [...kept, ...open];
+      const outPath = resolve(args.outDir, `${wallet}.csv`);
+      writeFileSync(outPath, csvOf(rows), 'utf8');
+
+      const failPath = resolve(args.outDir, `${wallet}.failures.csv`);
+      writeFileSync(failPath, failuresCsv(failureRows), 'utf8');
+
+      const buys = swaps.filter((s) => s.side === 'buy').length;
+      console.error(`  swaps parsed           ${swaps.length} (${buys} buy / ${swaps.length - buys} sell)`);
+      console.error(`  transactions missing   ${missing}`);
+      console.error('  parse failures by code');
+      if (failures.size === 0) console.error('    (none)');
+      for (const [code, count] of [...failures].sort((a, b) => b[1] - a[1])) {
+        console.error(`    ${code.padEnd(22)} ${count}`);
+      }
+      console.error(`  round trips formed     ${trips.length}`);
+      console.error(`  dropped as dust        ${dust} (< ${DUST_SOL} SOL in)`);
+      console.error(`  still open (sol_out=)  ${open.length}`);
+      console.error(`  REALISED ROUND TRIPS   ${kept.length}`);
+      console.error(`  -> ${outPath}`);
+      console.error(`  -> ${failPath}`);
+      console.error(`  ${((Date.now() - startedAt) / 1_000).toFixed(1)}s, ${rpcCalls} RPC calls\n`);
+    } catch (cause) {
+      const message = (cause as Error).message;
+      failedWallets.push({ wallet, message });
+      console.error(`  FAILED after ${((Date.now() - startedAt) / 1_000).toFixed(1)}s: ${message}`);
+      console.error('  continuing with the remaining wallets\n');
     }
-    process.stderr.write('\r');
+  }
 
-    const { trips, open } = pairFifo(swaps);
-    const kept = trips.filter((t) => t.solIn >= DUST_SOL && !Number.isNaN(t.exitTs));
-    const dust = trips.length - kept.length;
-
-    const rows = [...kept, ...open];
-    const outPath = resolve(args.outDir, `${wallet}.csv`);
-    writeFileSync(outPath, csvOf(rows), 'utf8');
-
-    const failPath = resolve(args.outDir, `${wallet}.failures.csv`);
-    writeFileSync(failPath, failuresCsv(failureRows), 'utf8');
-
-    const buys = swaps.filter((s) => s.side === 'buy').length;
-    console.error(`  swaps parsed           ${swaps.length} (${buys} buy / ${swaps.length - buys} sell)`);
-    console.error(`  transactions missing   ${missing}`);
-    console.error('  parse failures by code');
-    if (failures.size === 0) console.error('    (none)');
-    for (const [code, count] of [...failures].sort((a, b) => b[1] - a[1])) {
-      console.error(`    ${code.padEnd(22)} ${count}`);
-    }
-    console.error(`  round trips formed     ${trips.length}`);
-    console.error(`  dropped as dust        ${dust} (< ${DUST_SOL} SOL in)`);
-    console.error(`  still open (sol_out=)  ${open.length}`);
-    console.error(`  REALISED ROUND TRIPS   ${kept.length}`);
-    console.error(`  -> ${outPath}`);
-    console.error(`  -> ${failPath}`);
-    console.error(`  ${((Date.now() - startedAt) / 1_000).toFixed(1)}s, ${rpcCalls} RPC calls\n`);
+  if (failedWallets.length > 0) {
+    console.error(`── ${failedWallets.length} wallet(s) failed and were skipped`);
+    for (const f of failedWallets) console.error(`  ${f.wallet} — ${f.message}`);
   }
 }
 
