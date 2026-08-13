@@ -1,6 +1,6 @@
 # Context handoff — end of the session-29 window
 
-Head `<this commit>`. **1044 tests, 24 files, all passing.** Typecheck clean
+Head `eb90018`. **1044 tests, 24 files, all passing.** Typecheck clean
 including `scripts/`. Working tree clean, 0 unpushed. Paper mode; no keys, no
 live trading. Ledger unchanged: 0 pending intents, 2 open positions.
 
