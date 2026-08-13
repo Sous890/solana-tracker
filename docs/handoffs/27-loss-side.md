@@ -1,5 +1,17 @@
 # 27 — The loss side: breakeven recomputed on matched estimators
 
+> **SIZE-FLOOR CORRECTION — see `28-tasks-0-1.md`.**
+>
+> Every figure below omits `MIN_SOL_IN = 0.05` (`positionSizeSol`,
+> `analysis/part1_decide.py:29`). Applying it changes several wallets
+> materially — `yVrqX84d` by **+16.3pp** — because sub-dust entries such as a
+> 0.004 SOL trade returning +297,236% were being counted as winners.
+>
+> Floored counts: **6 clear at c=0** (not 4) and **4 at c=1.11%** (not 2). But
+> only **one of twelve** is outside the +5.19pp basis floor, and it is
+> `HSsJjkHr`, which carried that margin into the replay and came out at
+> −27.4pp. The per-wallet ordering is broadly preserved; the levels are not.
+
 Scored against `27-loss-side-prereg.md`, which was written and saved before the
 extended `scratch/measure-outcomes.ts` was run.
 

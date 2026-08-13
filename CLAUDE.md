@@ -510,11 +510,16 @@ Per the hard constraint above. Swept range c ∈ [0, 1.11%].
 
 **Sign changes inside the range — PROVISIONAL, label at the point of use:**
 
-- **Which wallets clear on their own outcomes** (`27-loss-side.md`). At c = 0
-  four clear — `popo3Rj6`, `6ww5Lc3u`, `Dhaee3Pz`, `HSsJjkHr`. At c = 1.11% two
-  do. `popo3Rj6` and `Dhaee3Pz` flip inside the range.
-- Consequently **"eight of twelve fail at zero cost" is a c = 0 statement**, not
-  a general one.
+- **Which wallets clear on their own outcomes** (`27-loss-side.md`, corrected in
+  `28-tasks-0-1.md`). With `MIN_SOL_IN = 0.05` applied: **six clear at c = 0,
+  four at c = 1.11%**. Without the floor it reads four and two — the difference
+  is sub-dust entries like a 0.004 SOL trade returning +297,236%.
+- **Only ONE of twelve is outside the +5.19pp basis floor**, `HSsJjkHr` at
+  +19.5pp, and that is the exact margin it carried into a replay that returned
+  −27.4pp. "Clears breakeven" and "clears the basis floor" are different claims
+  and the second is the one worth quoting.
+- Consequently **any "N of twelve fail" statement is a (c, size-floor) pair**,
+  not a general one. State both.
 - **The perfect-foresight ceiling at full search deflation**: +6.6pp at c = 0
   against +0.1pp at c = 1.11%. The sign holds but the reading "essentially zero
   headroom" is entirely a `c` statement.
