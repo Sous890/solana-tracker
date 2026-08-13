@@ -18,8 +18,12 @@ simulate every fill while claiming not to. Do not create or load a keypair path.
   verified from code and the database versus what was recalled, which is the
   distinction that matters most in this repo.
 
-  **Session 27 is the most recent and is eight files, because it ran three
-  pre-registered experiments.** Read in this order:
+  **Session 28 is the most recent. Start at `28-context-handoff.md`**, then
+  `28-copy-gap.md` (the result) and `28-tasks-0-1.md`. `28-prereg.md` carries an
+  amendment written before its expensive task.
+
+  Session 27 is eight files, because it ran three pre-registered experiments.
+  Read in this order:
 
   | file | |
   | --- | --- |
