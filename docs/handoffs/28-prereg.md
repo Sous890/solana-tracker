@@ -159,3 +159,77 @@ first, performance second.
 **Gap varies with nothing observable.** Copyability is real but unpredictable
 from what is in the corpus, which means it cannot be screened for in advance.
 Report and stop.
+
+---
+
+# AMENDMENT — written before any Task 2 RPC call
+
+## A1. The selection criterion was unexecutable
+
+"Median pool depth at entry" is measured nowhere in this project.
+`poolHistory.ts:17` deliberately prices from realised swaps rather than
+reserves, and `PoolState.depth_sol` is a **config constant everywhere** —
+`minLiquidityUsd / 180 / 2` = 41.67 SOL, identical for every mint and every
+wallet. DexScreener reports *current* liquidity, which for days-old memecoins is
+not liquidity at entry.
+
+Two of the five required emit fields go with it: median pool depth at entry, and
+the wallet's own median price impact — both need reserves.
+
+**Selection is amended to a swap-frequency proxy**: one signature page per mint
+gives swaps-per-minute around each entry. Highest / median / lowest on that.
+Cost ~3,238 calls, ~5 min for the 1,619 uncached mints across the eligible
+eleven.
+
+## A2. P4 is RETIRED, not restated
+
+P4 predicted the gap correlates negatively with pool depth at entry. Depth is
+unmeasurable, and restating it against the proxy would be changing what a
+prediction is tested against after writing it.
+
+**It is retired as untestable at n=3** and scored as neither hit nor miss. n=3
+could not have supported a correlation claim in any case; the prereg says so
+itself ("n=3 fits nothing").
+
+## A3. Replays emit measured price displacement per SOL, per trip
+
+Replacing the two dead fields with one that is derivable from a priced path:
+
+    displacement_per_sol = (P_after − P_before) / P_before / sol_in
+
+`P_before` is the last print strictly before the wallet's entry `blockTime`,
+`P_after` the first strictly after — bracketing their own trade. Contaminated by
+other trades in the same second, which `blockTime`'s one-second resolution makes
+unavoidable, and reported with that caveat.
+
+**The proxy is then validated against it**: swap-frequency-vs-measured-
+displacement correlation is reported as a check on the proxy itself, not as a
+result about wallets.
+
+## A4. BNnN2Mqf runs first, and may make Task 2 redundant
+
+`BNnN2Mqf`'s own-outcome margin is **+19.5pp — `HSsJjkHr`'s figure to the
+decimal**. If the gap is constant at 47pp its replay margin lands at −27.5pp.
+
+**Decision rule, fixed now: if `BNnN2Mqf`'s gap falls within 12pp of 47.0, Task 2
+is redundant for the stability question** and the three-wallet run proceeds only
+to build the displacement instrumentation, reported as such rather than as a
+stability result.
+
+### Sample size matched to the reference
+
+`BNnN2Mqf` has 146 one-trip-per-mint entries against `HSsJjkHr`'s 157, but **none
+cached** — a full run is ~135,577 calls and ~3.7 h, more than double the
+benchmark.
+
+**70 mints are sampled evenly across its span**, using the harness's own
+`sampleEvenly` convention, to match `HSsJjkHr`'s n=67 usable paths. Two reasons,
+both stated before the result: the measurements become directly comparable at
+equal n, and the cost halves to ~65k calls. The cost of a matched sample is
+calendar coverage, and the achieved window is reported.
+
+## A5. Basis gate, unchanged
+
+The run aborts unless `HSsJjkHr` reproduces **−27.4pp** before any new wallet is
+priced. Same discipline as `ladder_rules_v2.py`, which refuses to print a table
+unless the mirror reference reproduces the committed handoff.
