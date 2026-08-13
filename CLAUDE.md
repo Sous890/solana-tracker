@@ -18,9 +18,14 @@ simulate every fill while claiming not to. Do not create or load a keypair path.
   verified from code and the database versus what was recalled, which is the
   distinction that matters most in this repo.
 
-  **Session 28 is the most recent. Start at `28-context-handoff.md`**, then
-  `28-copy-gap.md` (the result) and `28-tasks-0-1.md`. `28-prereg.md` carries an
-  amendment written before its expensive task.
+  **Session 29 is the most recent. Start at `29-context-handoff.md`**, then
+  `29-displacement-screen.md` (the result) and `29-tasks-0-1.md`. `29-prereg.md`
+  is the document all three are scored against.
+
+  Session 28 is where the copy gap was measured. Start at
+  `28-context-handoff.md`, then `28-copy-gap.md` (the result) and
+  `28-tasks-0-1.md`. `28-prereg.md` carries an amendment written before its
+  expensive task, and a session-29 correction banner.
 
   Session 27 is eight files, because it ran three pre-registered experiments.
   Read in this order:
@@ -529,6 +534,48 @@ phase. It is annotated across `27-candidates.md`, `27-candidates-prereg.md`,
 population is a defect. `scratch/gap-score.ts` enforces the matched-trip filter
 in code; nothing enforces it in prose except this line.
 
+### Displacement spans 17.9× across eleven wallets, and P4's configuration is not there
+
+Session 29, `29-displacement-screen.md`. Median price displacement per SOL,
+bracketing the wallet's own entry, on the eleven scorable candidates:
+**2.67% (`G3gZWqrY`) to 47.84% (`BNnN2Mqf`)**, 11.0× across the six wallets with
+20 or more contributing trips. It is not a near-constant.
+
+**The screen's own selection question came back empty.** A copyable wallet needs
+low displacement *and* a positive own margin. Across the eleven those two
+properties never co-occur on a selectable wallet: the only one above the 20-trip
+floor with a positive own margin is `BNnN2Mqf`, which carries the **highest**
+displacement in the set and the worst replay margin ever measured (−39.2pp). The
+one wallet that does carry the configuration, `4Be9Cvxq` at 9.63% and +27.3pp,
+has **nineteen trips in existence** and can never clear the floor at any spend.
+
+**Do not re-run this to look for a better answer.** The ceiling under perfect
+recovery of every dropped trip was computed offline (`scratch/cap-bound.ts`) and
+no wallet crosses. The nearest miss is `8yJFWmVT` — displacement already under
+the line at 9.54%, own margin −2.7pp, needing +7.7pp, where the measured
+population sensitivity is +4.4pp per 20 trips.
+
+**Displacement/SOL is entangled with position size**, ρ = −0.518 against median
+`sol_in`. Raw displacement correlates **+0.409** with size, and dividing by size
+*widens* the wallet spread from 10.5× to 17.9× — a denominator that removed a
+real effect would narrow it. "Size-normalised" does less work than it sounds.
+
+### `DEFAULT_MAX_SIGNATURES` silently drops the busiest pools, and that is selective
+
+`poolHistory.ts:91` caps a pool signature walk at **20,000**. A pool that traded
+more than that between an entry and now is never paged back to the entry, so the
+trip yields no price path and disappears from the sample **with no error**.
+
+Measured in session 29: **108 of 532 sampled trips**, and the drop is not random.
+It selects on pool throughput, and throughput is what any price-impact statistic
+measures. Displacement in the top flow quartile is **3.94%/SOL against 11.12%**
+for the rest — **2.82×** — so dropping the busiest pools **biases displacement
+upward** on whatever survives.
+
+Any statistic computed from `getPoolSwaps` over memecoin pools inherits this.
+Report the drop count and its cause, or the number is a measurement on the quiet
+subset presented as a measurement on the wallet.
+
 ### Single-point entry-delay figures are noise-dominated at n≈66
 
 Shifting the entry instant by **479 ms** (5.000 s → 5.479 s) on the same 66 paths
@@ -690,3 +737,20 @@ now requires:
 
 A prediction shaded down that still misses optimistically is a stronger finding
 than an unshaded one — it says the bias is larger than the correction.
+
+**Running tally: 6 optimistic : 5 pessimistic** after session 29. It shaded not
+at all, as session 28 required, and P0/P1/P2 all landed inside their bands. The
+policy for the next pre-registration is therefore unchanged: **shade not at all,
+and say so.** The ~40% shading applied through sessions 26–27 is retired.
+
+### A correlation threshold pre-registered on eleven points is not a test
+
+Session 29's P3 fixed "confirms below |ρ| = 0.5, falsifies above 0.7" and came
+back at **−0.518**, with a two-sided permutation **p = 0.105** and a null band of
+roughly ±0.60 at n=11. The observed value was distinguishable neither from zero
+nor from the falsification threshold — **no result could have resolved P3**, so
+the prediction cost a session's worth of measurement and returned nothing.
+
+Before pre-registering a threshold on a correlation, compute the null band at the
+n you will actually have. If the band straddles both thresholds, the prediction is
+decorative: pre-register a difference of medians, or a larger n, or nothing.

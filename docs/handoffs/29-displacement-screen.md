@@ -148,6 +148,74 @@ authorise, not yours to assume."* So it is reported, not spent.
 
 ---
 
+## The free bound: the cap cannot move P4, so the 20–50k is not spent
+
+`scratch/cap-bound.ts`, offline. The 20,000-signature repage was gated on whether
+it could plausibly deliver P4's configuration. **It cannot**, and the reason is
+arithmetic rather than judgement.
+
+`cap` is trips dropped at the walk cap; `ceiling` is `n` if **every one** were
+recovered.
+
+| wallet | avail | n | cap | ceiling | disp/SOL | own (bracketed) | own (all trips) | can recovery reach P4? |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| 4Be9Cvxq | 19 | 4 | 9 | **13** | 9.63% | +27.3pp | +36.2pp | **no — ceiling below the 20 floor** |
+| E7gozEiA | 14 | 8 | 0 | **8** | 7.01% | −70.3pp | +12.7pp | **no — ceiling below the floor** |
+| G3gZWqrY | 12 | 5 | 3 | **8** | 2.67% | −12.0pp | +1.8pp | **no — ceiling below the floor** |
+| BNnN2Mqf | 70 | 42 | **1** | 43 | 47.84% | +8.6pp | +16.4pp | **no — needs disp to fall 4.8× on 1 recoverable trip** |
+| 8yJFWmVT | 70 | 50 | 9 | 59 | **9.54%** | −7.1pp | −2.7pp | the only near-miss; see below |
+| 8deJ9xeU | 70 | 42 | 5 | 47 | 4.43% | −28.8pp | −11.4pp | no — own margin negative on both populations |
+| 5dd3zjBQ | 70 | 45 | 14 | 59 | 6.47% | −31.2pp | −29.1pp | no |
+| CAPn1yH4 | 29 | 10 | 11 | 21 | 6.79% | −21.3pp | −10.5pp | no |
+| FsG3BaPm | 70 | 45 | 18 | 63 | 4.33% | −33.9pp | −30.2pp | no |
+| J6TDXvar | 70 | 40 | 21 | 61 | 9.04% | −29.1pp | −20.1pp | no |
+| 87rRdssF | 38 | 13 | 18 | 31 | 9.70% | −49.4pp | −40.4pp | no |
+
+**The two requirements are met by different wallets and the cap cannot move
+either across.** The wallets with real recovery potential — `J6TDXvar` 21,
+`FsG3BaPm` 18, `87rRdssF` 18, `5dd3zjBQ` 14 — are 20–40pp underwater on their own
+outcomes on *both* populations, and recovering trips moves **displacement**, not
+own margin. The only wallet with a positive own margin above the floor,
+`BNnN2Mqf`, has **exactly one** cap-dropped trip, and one trip cannot move a
+median of 42 by the required 4.8×. `4Be9Cvxq`, which confirms P4 on the letter,
+has **19 trips in existence** — it is below the selection floor at perfect
+recovery of everything, forever, at any spend.
+
+`8yJFWmVT` is the single honest near-miss: displacement **9.54%, already under the
+10% line**, n=50, and own margin −2.7pp on all trips. It needs **+7.7pp**. The
+measured sensitivity of own margin to population is the right yardstick and it is
+in the table: adding 20 trips (bracketed 50 → all 70) moved it **+4.4pp**. Nine
+recoverable trips buy roughly **+2pp** against the +7.7pp needed. Not impossible;
+not plausible.
+
+### And recovery would push displacement the wrong way for P4
+
+Within wallets, displacement against local pool flow — signatures in the ±30 s
+bracket, which is what the cap selects on:
+
+| | median displacement | n |
+| --- | ---: | ---: |
+| top-quartile flow (≥346 prints/60 s) | **3.94%/SOL** | 76 |
+| the rest | **11.12%/SOL** | 224 |
+
+**2.82×**, pooled ρ = **−0.320**, and negative in 7 of the 10 wallets with enough
+trips to compute it. This confirms the bias direction claimed above — the
+measurable subset is the quieter pools, so **every displacement figure in the
+main table is biased upward** — and it settles the spend question from the other
+side: recovery lowers displacement, which is useless when the binding constraint
+on every recoverable wallet is a **negative own margin**.
+
+### P3 is not indeterminate, it is unresolvable at n=11
+
+ρ = −0.518, two-sided permutation **p = 0.105** on 20,000 shuffles. At n=11 the
+null band on ρ is roughly ±0.60. **The observed value is distinguishable neither
+from 0 nor from 0.7** — so the pre-registered thresholds could not have resolved
+P3 whatever number came back. That is a defect in the test, not in the result, and
+it is worth carrying forward: a ρ threshold pre-registered on eleven points is
+not a test.
+
+---
+
 ## Task 3 — selected, costed, and not run
 
 The pre-registered rule: *select the wallet with the lowest displacement among
@@ -185,12 +253,34 @@ left open and stated as they stand:
 
 ---
 
+## The phase result: P4 is empty where it counts, and no spend changes that
+
+Stated plainly because it is the session's output and it is easy to soften.
+
+**No wallet this screen can select from has the configuration P4 describes**, and
+the free bound above shows that is not a sampling accident that money fixes. The
+configuration the 30-wallet screen was "structurally incapable of finding" is
+also absent from the eleven, at a ceiling of perfect recovery. `4Be9Cvxq` carries
+it and has nineteen trips in existence.
+
+P4 is recorded **CONFIRMED on the letter and empty in fact**, and the second half
+is the one that decides anything.
+
+**P5 is unsatisfiable on `FsG3BaPm`, and this is recorded before any number
+exists.** P5 predicts a gap in **13.1–56.5pp** and an ordering by displacement.
+`FsG3BaPm` has the lowest displacement of the three at 4.33%, so the ordering
+clause predicts the **smallest** gap of the three — below 13.1pp, outside P5's own
+band. **The two clauses of P5 cannot both hold on the wallet P5's own selection
+rule picks.** No replay is needed to know that, and running one would produce a
+number that scores against a self-contradicting prediction.
+
 ## What this does and does not say about the phase
 
 **It does not retire own-outcome screening.** The prereg's condition for that was
 P2 confirmed, P3 clean, and no wallet with a positive replay margin. P2 is
-confirmed; P3 is indeterminate; the third clause is untested because no replay
-ran. Two of three is not the finding.
+confirmed; **P3 turned out to be unresolvable at n=11 rather than clean or
+dirty**; the third clause is untested because no replay ran. One of three is not
+the finding, and the retirement is not claimed.
 
 **It does say the screen and the outcome are close to orthogonal here.** ρ between
 displacement/SOL and own margin is **+0.264** across the eleven — the two
