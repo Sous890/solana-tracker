@@ -2,9 +2,21 @@
 
 Scored against `27-candidates-prereg.md`. Realised outcomes only, no replay.
 
+> **Corrected 2026-08-13, session 29 Task 0. The `~47pp` copy-tax bar used
+> throughout this document is withdrawn.** It paired `HSsJjkHr`'s own-outcome
+> margin from the *session corpus* (+19.5pp, n=83) against its replay margin from
+> the *RPC export subset* (−27.4pp, n=67) — two different populations, and the
+> replay figure was additionally the 5.000 s delays-grid bucket rather than the
+> 5.479 s entry convention. **On matched trips the copy gap is 13.1pp (matched
+> trips, n=66)**; see `28-copy-gap.md`. Occurrences are annotated inline below,
+> not deleted — the withdrawn bar is what this screen was actually run against,
+> and the scoring in §3 only means anything against the bar as stated at the
+> time.
+
 **Result: the population is thin but not empty.** One candidate clears the ~47pp
-copy-tax bar and it rests on 22 decisions with a single trade carrying half its
-winner mass. C3 is falsified — **the first prediction in this phase to miss in
+copy-tax bar — **withdrawn; the matched-trip gap is 13.1pp (matched trips,
+n=66)**, against which the population is not thin at all — and it rests on 22
+decisions with a single trade carrying half its winner mass. C3 is falsified — **the first prediction in this phase to miss in
 the pessimistic direction**, after four consecutive optimistic ones.
 
 ---
@@ -26,7 +38,9 @@ under 3% on both calls and time.
 
 ## 2. The dust floor is what decides this screen
 
-Scored naively, two candidates cleared +47pp. Their `g_trim` was **679%** and
+Scored naively, two candidates cleared +47pp (withdrawn bar — see the banner;
+against 13.1pp on matched trips, n=66, the count is higher and the dust point
+below is what still decides the screen). Their `g_trim` was **679%** and
 **30,492%**. The recurring tell was the entry size:
 
 ```
@@ -76,7 +90,7 @@ carried into the template alongside the ratio, not instead of it.
 | --- | --- | --- | --- |
 | C1 | 4–8 clear at c=0 (unshaded 10) | 3–4 | at/below the shaded floor |
 | C2 | 1–3 clear at c=1.11% (unshaded 5) | **3** | CONFIRMED, top of range |
-| C3 | none above 47pp | **1** | **FALSIFIED** |
+| C3 | none above 47pp (bar since withdrawn) | **1** | **FALSIFIED** |
 | C4 | median −5 to −25pp | **−12.5pp** | CONFIRMED |
 | C5 | at least 3 unscorable | **19 of 30** | CONFIRMED, by 6× |
 
@@ -107,7 +121,8 @@ handoffs assumed.
 ## 5. What this does and does not say
 
 **Does not retire copy-trading as a genus.** The prereg's exhaustion criterion
-was "no candidate above ~47pp", and one is above it. The retirement stated in
+was "no candidate above ~47pp" — a bar now withdrawn, the matched-trip gap being
+**13.1pp (matched trips, n=66)** — and one is above it either way. The retirement stated in
 `27-stop-family.md` stays scoped to `HSsJjkHr` and to mirror-copying as an exit
 architecture.
 
@@ -118,10 +133,18 @@ applies: any pick is made at **M = 43 × 30 = 1,290**, and at that deflation on
 n=22 the margin loses roughly 20pp before anything else is considered.
 
 **The most informative row is `BNnN2Mqf`**: n=176, ratio 2.2×, top1 24%, the
-only robust profile in the set — and its margin is **+19.5pp, which is
-`HSsJjkHr`'s own-outcome margin to the decimal.** `HSsJjkHr` carried +19.5pp into
-the replay and came out at −27.4pp. On the one measurement of the copy tax that
-exists, `BNnN2Mqf` is predicted to fail by about the same 27pp.
+only robust profile in the set — and its margin is **+19.5pp (session corpus,
+n=176), which is `HSsJjkHr`'s own-outcome margin on the session corpus (n=83) to
+the decimal.** `HSsJjkHr` carried that +19.5pp into the replay and came out at
+−27.4pp — **two populations, and the replay figure is the 5.000 s bucket; at the
+5.479 s convention on matched trips it is −22.8pp against an own margin of
+−9.7pp, a gap of 13.1pp (matched trips, n=66)**. The prediction that follows is
+therefore a ~13pp one, not a ~27pp one.
+
+**Session 28 measured `BNnN2Mqf` directly and it failed far worse than either
+figure predicted**: own +17.3pp, replay −39.2pp, gap **56.5pp (matched trips,
+n=57)**. The "only robust profile in the set" is the least copyable thing
+measured anywhere. See `28-copy-gap.md`.
 
 ## 6. Not proved
 
@@ -133,4 +156,10 @@ exists, `BNnN2Mqf` is predicted to fail by about the same 27pp.
   `scripts/score-wallets.ts` does; hold-time-in-slots is **derived** at 400 ms
   and is not measured, because the history export carries no slot numbers.
 - Every margin here is a **zero-latency upper bound**, the same one `HSsJjkHr`
-  cleared by +19.5pp before failing by −27.4pp.
+  cleared by +19.5pp (session corpus, n=83) before failing by −27.4pp (RPC export
+  subset, n=67, 5.000 s bucket). Matched-trip figures: −9.7pp own, −22.8pp
+  replay, n=66.
+- **Every single-point entry-delay figure in this document is less reliable than
+  it reads.** A 479 ms shift of the entry instant moved the replay margin 4.5pp
+  on the same 66 paths, and in the *favourable* direction, so the entry-instant
+  curve is noise-dominated at this n (session 29 Task 0.2).

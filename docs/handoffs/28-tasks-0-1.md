@@ -110,9 +110,13 @@ noise, and it is a reason not to read the ordering as a dose-response.
 ### The framing that matters
 
 This is measured on the **wallets' own outcomes**. Session 27 measured the copy
-gap at **47pp** on the one wallet where it has been measured. A +12.8pp
-own-outcome lift is therefore roughly **35pp short before a copier touches it** —
-which is the whole thesis of this session restated from the other direction.
+gap at **47pp** on the one wallet where it had been measured — **withdrawn later
+the same session as a population artefact; on matched trips it is 13.1pp (matched
+trips, n=66)**, and Task 2 then measured a second wallet at **56.5pp (matched
+trips, n=57)**. A +12.8pp own-outcome lift is therefore short by **~0pp against
+the low gap and ~44pp against the high one**, and the gap is not constant, so
+"roughly 35pp short" was a single-wallet number quoted as a bar. The direction of
+the framing survives; the magnitude does not.
 
 Confluence is a real property of the corpus and it is the first entry-side
 variable this project has found that moves anything. It is not a tradeable edge

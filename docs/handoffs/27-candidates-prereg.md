@@ -3,6 +3,25 @@
 Written before any history export. Under the amended template, which now
 requires a recorded direction of prior miss and an explicit shading statement.
 
+> **Annotated 2026-08-13, session 29 Task 0 — the `~47pp` bar this document
+> builds C3 on is withdrawn, and the document is preserved unedited because a
+> pre-registration that gets its numbers corrected after the fact is not a
+> pre-registration.** The 47pp paired `HSsJjkHr`'s own-outcome margin from the
+> *session corpus* (+19.5pp, n=83) against its replay margin from the *RPC export
+> subset* (−27.4pp, n=67, at the 5.000 s delays-grid bucket). **On matched trips
+> the copy gap is 13.1pp (matched trips, n=66)**, and it is not a constant — a
+> second wallet came in at 56.5pp (matched trips, n=57). C3's exhaustion
+> criterion was therefore stated against a bar that does not exist as a scalar.
+> C3 was falsified anyway, so the scoring stands; the *interpretation* of the
+> falsification does not.
+>
+> **Entry-delay reliability flag (Task 0.2):** the "HSsJjkHr replay, entry 5 s"
+> row below is the 5.000 s delays-grid bucket. At the 5.479 s convention the
+> M=43 cell is **−22.8pp, not −27.4pp** — a 4.5pp move out of a 479 ms shift on
+> the same 66 paths, in the *favourable* direction. Every single-point
+> entry-delay figure in this document is less reliable than it reads. Annotated,
+> not deleted. See `28-copy-gap.md`.
+
 ## What this is and is not
 
 Realised outcomes only — the same zero-latency upper bound step 0 used. **No

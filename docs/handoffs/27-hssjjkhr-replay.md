@@ -15,6 +15,23 @@
 > past `signalTs`, so the wallet's own print was never a candidate. The verdict,
 > the −27.4pp margin and all five scored conditions stand.
 
+> **ENTRY-DELAY RELIABILITY FLAG — session 29 Task 0.2, 2026-08-13.**
+>
+> The delay 0 s / 5 s / 15 s comparison in §3, and every other single-point
+> entry-delay figure here, is less reliable than it reads. Session 28 shifted the
+> entry instant by 479 ms (5.000 s → 5.479 s) on the same 66 paths and the margin
+> moved **4.5pp in the favourable direction**: the **−27.4pp quoted throughout
+> this document is the 5.000 s delays-grid bucket; at the 5.479 s convention it is
+> −22.8pp (matched trips, n=66)**. A 4.5pp swing out of a sub-second shift is
+> comparable to the delay-to-delay differences tabulated here, so those
+> differences do not carry the precision their decimals imply.
+>
+> The verdict is unaffected — negative at c = 0 at every entry instant measured.
+> Note also that the **+19.5pp own-outcome margin** cited in §8 is the *session
+> corpus* (n=83) figure; on the matched replayed subset the same wallet's own
+> margin is **−9.7pp (matched trips, n=66)**. Annotated, not deleted. See
+> `28-copy-gap.md`.
+
 Scored against `27-hssjjkhr-replay-prereg.md`, written before any RPC call.
 
 **Verdict: DOES NOT CLEAR.** Pre-registered non-clearing condition 1 fires by

@@ -11,6 +11,16 @@ price path for every replayable trip is already in `cache/pools`.
 > rules, the rule count, the deflation band and every prediction are unaffected —
 > all of them enter at 5.479 s, past `signalTs`.
 
+> **ENTRY-DELAY RELIABILITY FLAG — session 29 Task 0.2, 2026-08-13.** The
+> correction above quotes **~4.3pp** as the entry cost from 0 s to 5 s. That
+> figure is less reliable than it reads, and so is the −31.9pp win-rate
+> comparison it corrects. Session 28 moved the entry instant 479 ms
+> (5.000 s → 5.479 s) on the same 66 paths and the margin moved **4.5pp in the
+> favourable direction** — larger than the entry cost being quoted. Single-point
+> entry-delay comparisons are noise-dominated at this n. The claim that the rules
+> and predictions are unaffected still holds: they all enter at 5.479 s.
+> Annotated, not deleted. See `28-copy-gap.md`.
+
 ## The question
 
 The mirror exit is one rule among many, and it is the one measured at −27.4pp.

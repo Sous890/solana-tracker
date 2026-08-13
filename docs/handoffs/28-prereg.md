@@ -3,6 +3,29 @@
 Written before any code for this session exists. Scored the same way as
 `27-exit-rules.md`, `27-stop-family.md` and the ladder run.
 
+> **Annotated 2026-08-13, session 29 Task 0 — numbers below are withdrawn, and
+> the document is preserved unedited because a pre-registration that gets its
+> numbers corrected after the fact is not a pre-registration.** Three figures
+> stated here were falsified by the session they pre-registered:
+>
+> - **`gap = 47.0pp`** (§"The quantity this session introduces", and the bar of
+>   "~+47pp" and the −27.5pp projection that follow from it). It pairs an
+>   own-outcome margin from the *session corpus* (+19.5pp, n=83) against a replay
+>   margin from the *RPC export subset* (−27.4pp, n=67, and at the 5.000 s
+>   delays-grid bucket rather than the 5.479 s convention this document itself
+>   fixes). **On matched trips the gap is 13.1pp (matched trips, n=66)**: own
+>   −9.7pp, replay −22.8pp.
+> - **"the wallet's payoff is 1.20 and a copier's is 0.60."** Actual: wallet
+>   1.65, copier at entry 0 **1.21**, at 5.479 s 0.97. The 1.20 was the copier's
+>   own figure attributed to the wallet.
+> - **The premise that the gap might be "roughly constant"** was itself falsified:
+>   13.1pp on `HSsJjkHr` against 56.5pp on `BNnN2Mqf`.
+>
+> **Every single-point entry-delay figure in this document is less reliable than
+> it reads** — including the ~4.3pp audit figure cited in §"Why this session is
+> not another exit rule". A 479 ms shift of the entry instant moved margin 4.5pp
+> on the same 66 paths, in the *favourable* direction. See `28-copy-gap.md`.
+
 ## Why this session is not another exit rule
 
 Twenty rules have been evaluated in this phase. **Every one of them is an exit

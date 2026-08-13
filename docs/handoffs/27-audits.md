@@ -3,6 +3,21 @@
 Both audits ran offline against `scratch/replay-out/paths.json`. No RPC. They
 converged on the same defect at opposite ends of the analysis.
 
+> **ENTRY-DELAY RELIABILITY FLAG — session 29 Task 0.2, 2026-08-13.**
+>
+> Every single-point entry-delay figure in this document is less reliable than it
+> reads, **and that includes Audit 2's own corrected result, the −4.3pp entry
+> cost from 0 s to 5 s.** Session 28 shifted the entry instant by 479 ms
+> (5.000 s → 5.479 s) on the same 66 paths and the replay margin moved **4.5pp,
+> in the favourable direction**: −27.4pp became −22.8pp. A 4.5pp swing out of a
+> sub-second shift is the same order as the entry-delay costs quoted here, so the
+> entry-instant curve is noise-dominated at this n.
+>
+> What survives: the **defect** Audit 2 found is real, the delay-0 rung is still
+> unachievable, and the direction — a later entry is worse — is unchanged. What
+> does not survive: the **levels and the delay-to-delay differences**, read to a
+> decimal. Annotated, not deleted. See `28-copy-gap.md`.
+
 ---
 
 ## Audit 2 — the entry was priced at the wallet's own fill

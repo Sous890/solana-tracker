@@ -12,6 +12,15 @@
 > `HSsJjkHr`, which carried that margin into the replay and came out at
 > −27.4pp. The per-wallet ordering is broadly preserved; the levels are not.
 
+> **POPULATION CORRECTION — session 29 Task 0, 2026-08-13.** The pairing in the
+> banner above — `HSsJjkHr` carrying **+19.5pp** into a replay that returned
+> **−27.4pp** — is two different populations, and the second is the 5.000 s
+> delays-grid bucket rather than the 5.479 s entry convention. The own-outcome
+> +19.5pp is the *session corpus* (n=83); the replay is the *RPC export subset*
+> (n=67). **On matched trips: own −9.7pp, replay −22.8pp, gap 13.1pp (matched
+> trips, n=66).** The +19.5pp in the table in §2 is a session-corpus figure and
+> must be quoted as one. See `28-copy-gap.md`.
+
 Scored against `27-loss-side-prereg.md`, which was written and saved before the
 extended `scratch/measure-outcomes.ts` was run.
 

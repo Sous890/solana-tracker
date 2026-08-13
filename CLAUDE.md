@@ -501,6 +501,48 @@ out-of-sample; 36% pool coverage; a replay basis measured ~5pp optimistic; and a
 unmeasured `c`. The margins are negative at c = 0 throughout, so `c` is not what
 decides it.
 
+### The copy gap is not constant, and own-outcome screening is anti-correlated with it
+
+`gap_w = own_outcome_margin_w − replay_margin_w`, both sides on the **same
+trips**. Session 28, `28-copy-gap.md`:
+
+| wallet | n | own | replay | **gap** | displacement/SOL |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `HSsJjkHr` | 66 | −9.7pp | −22.8pp | **13.1pp** | 5.77% |
+| `BNnN2Mqf` | 57 | +17.3pp | −39.2pp | **56.5pp** | **51.20%** |
+
+`BNnN2Mqf` was the 30-wallet screen's only robust profile and is the least
+copyable thing measured anywhere: a one-SOL entry moves its own entry price
+~51%. **Every candidate this project has ever ranked was ranked on own-outcome
+margin, and on the two wallets where both are known that screen points the wrong
+way.** So "wallet X clears by N pp on its own outcomes" says nothing about
+whether it is copyable, and a gap cannot be treated as a fixed bar — there is no
+scalar copy tax.
+
+**The 47pp copy gap is withdrawn.** It differenced an own-outcome margin from the
+*session corpus* (n=83) against a replay margin from the *RPC export subset*
+(n=67, and at the 5.000 s bucket). Sixth instance of that error class in the
+phase. It is annotated across `27-candidates.md`, `27-candidates-prereg.md`,
+`27-loss-side.md`, `28-prereg.md` and `28-tasks-0-1.md`; do not re-derive it.
+
+**Population naming is a lint, not a habit.** Any margin quoted without a named
+population is a defect. `scratch/gap-score.ts` enforces the matched-trip filter
+in code; nothing enforces it in prose except this line.
+
+### Single-point entry-delay figures are noise-dominated at n≈66
+
+Shifting the entry instant by **479 ms** (5.000 s → 5.479 s) on the same 66 paths
+moved `HSsJjkHr`'s replay margin **4.5pp, in the favourable direction**: −27.4pp
+→ −22.8pp. That is larger than most of the entry-delay costs phase 27 quotes,
+**including Audit 2's corrected −4.3pp for 0 s → 5 s**. Directions survive — a
+later entry is worse; the delay-0 rung is unachievable because it prices the
+wallet's own fill. Levels and delay-to-delay differences do not. The phase-27
+docs carry an ENTRY-DELAY RELIABILITY FLAG banner saying so.
+
+**Two entry conventions exist and differ by 4.5pp**: the delays-grid `delay_s`
+integer buckets and the 5.479 s exact entry (`scratch/measure-holdtime.ts:11`,
+itself n=1). Any entry figure must say which it means.
+
 ### The cost term, and which conclusions it makes provisional
 
 Per the hard constraint above. Swept range c ∈ [0, 1.11%].
@@ -519,9 +561,13 @@ Per the hard constraint above. Swept range c ∈ [0, 1.11%].
   four at c = 1.11%**. Without the floor it reads four and two — the difference
   is sub-dust entries like a 0.004 SOL trade returning +297,236%.
 - **Only ONE of twelve is outside the +5.19pp basis floor**, `HSsJjkHr` at
-  +19.5pp, and that is the exact margin it carried into a replay that returned
-  −27.4pp. "Clears breakeven" and "clears the basis floor" are different claims
-  and the second is the one worth quoting.
+  **+19.5pp (session corpus, n=83)**, and it carried that into a replay that
+  returned **−27.4pp (RPC export subset, n=67, 5.000 s bucket)**. "Clears
+  breakeven" and "clears the basis floor" are different claims and the second is
+  the one worth quoting. **Those two figures are different populations and must
+  never be differenced** — that pairing is what produced the withdrawn 47pp copy
+  gap. On matched trips: own **−9.7pp**, replay **−22.8pp**, gap **13.1pp
+  (matched trips, n=66)**.
 - Consequently **any "N of twelve fail" statement is a (c, size-floor) pair**,
   not a general one. State both.
 - **The perfect-foresight ceiling at full search deflation**: +6.6pp at c = 0
